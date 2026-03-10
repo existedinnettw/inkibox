@@ -25,13 +25,13 @@ Caution!!! enable new KiCad API in `preferences/preferences/plugins` if not enab
 # plugins are written in `kipy`
 # for pcbnew (deprecated), `export PYTHONPATH="/usr/lib/python3/dist-packages:$PYTHONPATH"`
 
-uv run python scripts/constraint_footprint.py
+uv run python src/scripts/constraint_footprint.py
 
-uv run python scripts/calculate_footprint_area.py
+uv run python src/scripts/calculate_footprint_area.py
 
-uv run python scripts/toggle_copper_zone.py off
+uv run python src/scripts/toggle_copper_zone.py off
 
-# uv run python scripts/clear_tracks_vias.py
+# uv run python src/scripts/clear_tracks_vias.py
 ```
 
 ## todo
@@ -44,4 +44,3 @@ uv run python scripts/toggle_copper_zone.py off
   * [ ] NA
 * setup
   * [KiCAD-MCP-Server](https://github.com/mixelpixx/KiCAD-MCP-Server)
-

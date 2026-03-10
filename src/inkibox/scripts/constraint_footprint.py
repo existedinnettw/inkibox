@@ -8,58 +8,15 @@ from kipy.util.units import to_mm
 from kipy.proto.board.board_types_pb2 import BoardLayer
 from kipy.errors import ApiError, ConnectionError
 
-BOARD_X_LEN_MM = 37.5
-BOARD_Y_LEN_MM = 40.0
-
-# Configuration: Tree structure of footprint constraints
-# Root represents the board origin, children are positioned relative to their parent
-CONSTRAINT_TREE = {
-    "reference": None,  # Root is the board
-    "offset": (0, 0),  # No offset for root
-    "children": [
-        {
-            "reference": "J1",
-            "offset": (
-                (BOARD_X_LEN_MM - (2.54 * 11)) / 2,
-                2.54 / 2 + 1,
-            ),  # Position from board origin (level 1)
-            "children": [
-                {
-                    "reference": "J2",
-                    "offset": (
-                        -2.54 * 1,
-                        2.54 * 2,
-                    ),  # Position relative to J1 (level 2)
-                    "children": [
-                        {
-                            "reference": "J3",
-                            "offset": (
-                                2.54 * 12,
-                                2.54 * 6,
-                            ),  # Position relative to J2 (level 3)
-                            "children": [],
-                        },
-                        {
-                            "reference": "J4",
-                            "offset": (
-                                2.54 * 2,
-                                2.54 * 12,
-                            ),  # Position relative to J2 (level 3)
-                            "children": [],
-                        },
-                    ],
-                }
-            ],
-        },
-    ],
-}
+# TODO: the best algorithm for constraint is graph with DoF, rather than tree. This allows more flexible constraints (e.g. J3 and J4 can be swapped, but both must be at the same distance from J2). For now, we use a simple tree structure.
 
 
-def apply_constraints(board_path=None):
+def apply_constraints(constraint_tree, board_path=None):
     """
     Connect to KiCad via kipy, apply all footprint constraints, and save.
 
     Args:
+        constraint_tree (dict): Tree structure defining footprint constraints.
         board_path (Optional[str]): Optional board path (logged for clarity; the
             active KiCad board is used)
 
@@ -67,9 +24,7 @@ def apply_constraints(board_path=None):
         bool: True if successful, False otherwise
     """
     try:
-        requested_board = (
-            str(Path(board_path).expanduser().resolve()) if board_path else None
-        )
+        requested_board = str(Path(board_path).expanduser().resolve()) if board_path else None
 
         kicad = KiCad()
         print(f"Connected to KiCad {kicad.get_version()}")
@@ -81,11 +36,7 @@ def apply_constraints(board_path=None):
 
         def find_footprint(ref):
             return next(
-                (
-                    fp
-                    for fp in board.get_footprints()
-                    if fp.reference_field.text.value == ref
-                ),
+                (fp for fp in board.get_footprints() if fp.reference_field.text.value == ref),
                 None,
             )
 
@@ -107,12 +58,8 @@ def apply_constraints(board_path=None):
             if not edge_cuts_rectangles:
                 return None, None
 
-            min_x = min(
-                to_mm(min(r.top_left.x, r.bottom_right.x)) for r in edge_cuts_rectangles
-            )
-            min_y = min(
-                to_mm(min(r.top_left.y, r.bottom_right.y)) for r in edge_cuts_rectangles
-            )
+            min_x = min(to_mm(min(r.top_left.x, r.bottom_right.x)) for r in edge_cuts_rectangles)
+            min_y = min(to_mm(min(r.top_left.y, r.bottom_right.y)) for r in edge_cuts_rectangles)
 
             return min_x, min_y
 
@@ -129,9 +76,7 @@ def apply_constraints(board_path=None):
 
         footprints_to_update = []
 
-        def process_constraint_node(
-            node, parent_x_mm, parent_y_mm, parent_label, level=0
-        ):
+        def process_constraint_node(node, parent_x_mm, parent_y_mm, parent_label, level=0):
             """
             Recursively process constraint tree nodes.
 
@@ -178,12 +123,8 @@ def apply_constraints(board_path=None):
             print(f"{indent}  Y: {current_y_mm:.4f} mm")
 
             print(f"{indent}Setting position:")
-            print(
-                f"{indent}  X: {target_x_mm:.4f} mm ({parent_label} + {offset_x_mm:.4f})"
-            )
-            print(
-                f"{indent}  Y: {target_y_mm:.4f} mm ({parent_label} + {offset_y_mm:.4f})"
-            )
+            print(f"{indent}  X: {target_x_mm:.4f} mm ({parent_label} + {offset_x_mm:.4f})")
+            print(f"{indent}  Y: {target_y_mm:.4f} mm ({parent_label} + {offset_y_mm:.4f})")
 
             # Update footprint position
             footprint.position = Vector2.from_xy_mm(target_x_mm, target_y_mm)
@@ -191,17 +132,20 @@ def apply_constraints(board_path=None):
 
             # Process children recursively
             for child in node["children"]:
-                process_constraint_node(
-                    child, target_x_mm, target_y_mm, reference, level + 1
-                )
+                process_constraint_node(child, target_x_mm, target_y_mm, reference, level + 1)
 
         # Process the constraint tree starting from root
         try:
             process_constraint_node(
-                CONSTRAINT_TREE, board_origin_x_mm, board_origin_y_mm, "board origin"
+                constraint_tree, board_origin_x_mm, board_origin_y_mm, "board origin"
             )
         except ValueError as e:
             print(f"ERROR: {str(e)}")
+            return False
+        except KeyError as e:
+            print(
+                f"ERROR: Malformed constraint node — missing required key {e}. Each node must have 'reference', 'offset', and 'children'."
+            )
             return False
 
         # Commit and save
@@ -222,25 +166,10 @@ def apply_constraints(board_path=None):
                 return sum(count_nodes(child) for child in node["children"])
             return 1 + sum(count_nodes(child) for child in node["children"])
 
-        total_constraints = count_nodes(CONSTRAINT_TREE)
-        print(
-            f"\n✓ Success! Applied {total_constraints} constraint(s) from tree structure."
-        )
+        total_constraints = count_nodes(constraint_tree)
+        print(f"\n✓ Success! Applied {total_constraints} constraint(s) from tree structure.")
         return True
 
     except (ApiError, ConnectionError, Exception) as e:
         print(f"ERROR: {str(e)}")
         return False
-
-
-if __name__ == "__main__":
-    # Get board path from command line or use default
-    if len(sys.argv) > 1:
-        board_file = sys.argv[1]
-    else:
-        # Default to zectio_b.kicad_pcb in the parent directory
-        script_dir = Path(__file__).resolve().parent
-        board_file = script_dir.parent / "zectio_b.kicad_pcb"
-
-    success = apply_constraints(board_file)
-    sys.exit(0 if success else 1)
