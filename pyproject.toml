@@ -14,7 +14,13 @@
     ]
 
 [dependency-groups]
-    dev = ["pytest>=9.0.2", "ruff>=0.14.13"]
+    dev = [
+        "easyeda2kicad>=0.8.0",
+        "pre-commit>=4.0.0",
+        "pytest>=9.0.2",
+        "ruff>=0.14.13",
+        "ty>=0.0.1",
+    ]
 
 
     [project.scripts]

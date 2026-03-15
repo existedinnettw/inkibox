@@ -2,14 +2,15 @@
 
 scripts as KiCad toolbox
 
-## run
+## setup
 
 ```bash
-kikit panelize -p kikit_panel.json zectio_b.kicad_pcb panelized/zectio_b.kicad_pcb
+uv sync
+uv run pre-commit install
 
-# or
-# kikit panelize --layout "rows: 2; cols: 2" --cuts "type: vcuts" --framing "type: railstb" --tooling "type: 4hole; hoffset: 3mm; voffset: 3mm" --fiducials "type: 4fid; hoffset: 6mm; voffset: 3mm" "./zectio_b.kicad_pcb" "./panelized/panelized_zectio_b.kicad_pcb"
 ```
+
+## run
 
 ```bash
 kicad-cli pcb export step zectio_b.kicad_pcb
@@ -25,13 +26,13 @@ Caution!!! enable new KiCad API in `preferences/preferences/plugins` if not enab
 # plugins are written in `kipy`
 # for pcbnew (deprecated), `export PYTHONPATH="/usr/lib/python3/dist-packages:$PYTHONPATH"`
 
-uv run python src/scripts/constraint_footprint.py
+uv run python -m inkibox.scripts.constraint_footprint
 
-uv run python src/scripts/calculate_footprint_area.py
+uv run python -m inkibox.scripts.calculate_footprint_area
 
-uv run python src/scripts/toggle_copper_zone.py off
+uv run python -m inkibox.scripts.toggle_copper_zone off
 
-# uv run python src/scripts/clear_tracks_vias.py
+# uv run python -m inkibox.scripts.clear_tracks_vias
 ```
 
 ## todo
