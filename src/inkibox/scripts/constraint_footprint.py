@@ -1,12 +1,10 @@
 from pathlib import Path
-import sys
 
 from kipy import KiCad
 from kipy.board_types import BoardRectangle
 from kipy.geometry import Vector2
-from kipy.util.units import to_mm
 from kipy.proto.board.board_types_pb2 import BoardLayer
-from kipy.errors import ApiError, ConnectionError
+from kipy.util.units import to_mm
 
 # TODO: the best algorithm for constraint is graph with DoF, rather than tree. This allows more flexible constraints (e.g. J3 and J4 can be swapped, but both must be at the same distance from J2). For now, we use a simple tree structure.
 
@@ -24,7 +22,9 @@ def apply_constraints(constraint_tree, board_path=None):
         bool: True if successful, False otherwise
     """
     try:
-        requested_board = str(Path(board_path).expanduser().resolve()) if board_path else None
+        requested_board = (
+            str(Path(board_path).expanduser().resolve()) if board_path else None
+        )
 
         kicad = KiCad()
         print(f"Connected to KiCad {kicad.get_version()}")
@@ -36,7 +36,11 @@ def apply_constraints(constraint_tree, board_path=None):
 
         def find_footprint(ref):
             return next(
-                (fp for fp in board.get_footprints() if fp.reference_field.text.value == ref),
+                (
+                    fp
+                    for fp in board.get_footprints()
+                    if fp.reference_field.text.value == ref
+                ),
                 None,
             )
 
@@ -58,8 +62,12 @@ def apply_constraints(constraint_tree, board_path=None):
             if not edge_cuts_rectangles:
                 return None, None
 
-            min_x = min(to_mm(min(r.top_left.x, r.bottom_right.x)) for r in edge_cuts_rectangles)
-            min_y = min(to_mm(min(r.top_left.y, r.bottom_right.y)) for r in edge_cuts_rectangles)
+            min_x = min(
+                to_mm(min(r.top_left.x, r.bottom_right.x)) for r in edge_cuts_rectangles
+            )
+            min_y = min(
+                to_mm(min(r.top_left.y, r.bottom_right.y)) for r in edge_cuts_rectangles
+            )
 
             return min_x, min_y
 
@@ -76,7 +84,9 @@ def apply_constraints(constraint_tree, board_path=None):
 
         footprints_to_update = []
 
-        def process_constraint_node(node, parent_x_mm, parent_y_mm, parent_label, level=0):
+        def process_constraint_node(
+            node, parent_x_mm, parent_y_mm, parent_label, level=0
+        ):
             """
             Recursively process constraint tree nodes.
 
@@ -123,8 +133,12 @@ def apply_constraints(constraint_tree, board_path=None):
             print(f"{indent}  Y: {current_y_mm:.4f} mm")
 
             print(f"{indent}Setting position:")
-            print(f"{indent}  X: {target_x_mm:.4f} mm ({parent_label} + {offset_x_mm:.4f})")
-            print(f"{indent}  Y: {target_y_mm:.4f} mm ({parent_label} + {offset_y_mm:.4f})")
+            print(
+                f"{indent}  X: {target_x_mm:.4f} mm ({parent_label} + {offset_x_mm:.4f})"
+            )
+            print(
+                f"{indent}  Y: {target_y_mm:.4f} mm ({parent_label} + {offset_y_mm:.4f})"
+            )
 
             # Update footprint position
             footprint.position = Vector2.from_xy_mm(target_x_mm, target_y_mm)
@@ -132,7 +146,9 @@ def apply_constraints(constraint_tree, board_path=None):
 
             # Process children recursively
             for child in node["children"]:
-                process_constraint_node(child, target_x_mm, target_y_mm, reference, level + 1)
+                process_constraint_node(
+                    child, target_x_mm, target_y_mm, reference, level + 1
+                )
 
         # Process the constraint tree starting from root
         try:
@@ -140,7 +156,7 @@ def apply_constraints(constraint_tree, board_path=None):
                 constraint_tree, board_origin_x_mm, board_origin_y_mm, "board origin"
             )
         except ValueError as e:
-            print(f"ERROR: {str(e)}")
+            print(f"ERROR: {e!s}")
             return False
         except KeyError as e:
             print(
@@ -167,9 +183,11 @@ def apply_constraints(constraint_tree, board_path=None):
             return 1 + sum(count_nodes(child) for child in node["children"])
 
         total_constraints = count_nodes(constraint_tree)
-        print(f"\n✓ Success! Applied {total_constraints} constraint(s) from tree structure.")
+        print(
+            f"\n✓ Success! Applied {total_constraints} constraint(s) from tree structure."
+        )
         return True
 
-    except (ApiError, ConnectionError, Exception) as e:
-        print(f"ERROR: {str(e)}")
+    except Exception as e:  # noqa: BLE001 - CLI entry point: report and return False
+        print(f"ERROR: {e!s}")
         return False
