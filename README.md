@@ -4,6 +4,9 @@ scripts as KiCad toolbox
 
 ## setup
 
+kippm and its libraries come from the org's Gitea PyPI index: copy `.env.example` to `.env`,
+fill in a Gitea token and load it (`set -a; . ./.env; set +a`, or direnv) before `uv sync`.
+
 ```bash
 uv sync
 uv run pre-commit install
@@ -80,3 +83,9 @@ See `ecat_io_b/scripts/generate.py` for a complete carrier (three modules, a buc
 * `inkibox.kicad`
   * [ ] diagonal (45°) routing and net classes in `GridRouter`
   * [ ] hierarchical sheets in `Schematic`
+
+## CI / release
+
+`ci.yml` runs ruff, ty, an import check and `uv build` on Linux and Windows. `release.yml`
+publishes on a `vX.Y.Z` tag matching `[project].version`: build, upload to the Gitea index,
+GitHub release. Both set the `.env.example` variables from the `GITEA_PYPI_*` secrets pushed by `git-acc-rtn`.
