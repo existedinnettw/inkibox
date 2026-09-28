@@ -1,0 +1,71 @@
+name: release
+
+# Tag `vX.Y.Z` (matching [project].version) to publish inkibox to the organisation's Gitea
+# PyPI index and attach the distributions to a GitHub release.
+#
+# Repository secrets (pushed by the git-acc-rtn repo's secret-sync workflow):
+#   GITEA_PYPI_USERNAME / GITEA_PYPI_PASSWORD - account allowed to read/write PyPI packages in the org
+#   GITEA_PYPI_URL                            - publish endpoint,
+#                                               e.g. https://gitea.example.org/api/packages/<org>/pypi
+#
+# A file whose name the index already lists is skipped, so re-running a release after a
+# partial failure is safe; Gitea itself refuses to overwrite a version.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+env:
+  UV_INDEX: inkr=https://gitea.insleker.org/api/packages/inkr_org/pypi/simple/
+  UV_INDEX_INKR_USERNAME: ${{ secrets.GITEA_PYPI_USERNAME }}
+  UV_INDEX_INKR_PASSWORD: ${{ secrets.GITEA_PYPI_PASSWORD }}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # the GitHub release
+    env:
+      PUBLISH_URL: ${{ secrets.GITEA_PYPI_URL }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          python-version: "3.13"
+          enable-cache: false # no cache in the job that publishes
+
+      - name: Tag must match the inkibox version
+        run: |
+          version=$(uv version --short)
+          test "v${version}" = "${GITHUB_REF_NAME}" || {
+            echo "tag ${GITHUB_REF_NAME} != v${version} in pyproject.toml"; exit 1; }
+
+      - run: uv sync --locked
+      - run: uv run python -c "import inkibox.kicad"
+      - run: uv build
+
+      - name: Publish to the Gitea PyPI index
+        env:
+          UV_PUBLISH_USERNAME: ${{ secrets.GITEA_PYPI_USERNAME }}
+          UV_PUBLISH_PASSWORD: ${{ secrets.GITEA_PYPI_PASSWORD }}
+        run: |
+          for f in dist/*; do
+            file=$(basename "$f")
+            name=$(echo "${file%%-[0-9]*}" | tr '_' '-')
+            if curl -fsS -u "$UV_PUBLISH_USERNAME:$UV_PUBLISH_PASSWORD" "$PUBLISH_URL/simple/$name/" 2>/dev/null \
+                | grep -qF "$file"; then
+              echo "skip $file: already in the index"
+              continue
+            fi
+            uv publish --publish-url "$PUBLISH_URL" "$f"
+          done
+
+      - name: GitHub release with the distributions
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: dist/*
+          generate_release_notes: true

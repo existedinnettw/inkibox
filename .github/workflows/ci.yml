@@ -1,0 +1,58 @@
+name: ci
+
+# kippm and its libraries come from the org's Gitea PyPI index (see uv.lock). The index is not
+# declared in pyproject.toml (developers keep it in ~/.config/uv/uv.toml), so CI declares it
+# here with the same name and reads with the GITEA_PYPI_* secrets pushed by git-acc-rtn.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  UV_INDEX: inkr=https://gitea.insleker.org/api/packages/inkr_org/pypi/simple/
+  UV_INDEX_INKR_USERNAME: ${{ secrets.GITEA_PYPI_USERNAME }}
+  UV_INDEX_INKR_PASSWORD: ${{ secrets.GITEA_PYPI_PASSWORD }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          python-version: "3.13"
+      - run: uv sync --locked
+      - run: uv run ruff format --check src/
+      - run: uv run ruff check src/
+      - run: uv run ty check src/
+
+  build:
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync --locked
+      # no test suite yet: at least import the headless generator (pulls in kippm)
+      - run: uv run python -c "import inkibox.kicad"
+      - run: uv build
+      - if: matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dist
+          path: dist/
