@@ -67,5 +67,8 @@ jobs:
       - name: GitHub release with the distributions
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          files: dist/*
+          # not dist/* : that also picks up the .gitignore uv writes into dist/
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
           generate_release_notes: true
