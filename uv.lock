@@ -560,7 +560,7 @@ wheels = [
 
 [[package]]
 name = "inkibox"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "iflow-mcp-kicad-mcp" },
@@ -586,7 +586,7 @@ requires-dist = [
     { name = "kicad-python", specifier = ">=0.5.0" },
     { name = "kicad-sch-api", specifier = ">=0.5.6" },
     { name = "kikit", specifier = ">=1.7.2" },
-    { name = "kippm", specifier = ">=0.3.1" },
+    { name = "kippm", specifier = ">=0.4.1" },
     { name = "sexpdata", specifier = ">=1.0.2" },
 ]
 
@@ -809,16 +809,16 @@ wheels = [
 
 [[package]]
 name = "kippm"
-version = "0.3.1"
+version = "0.4.1"
 source = { registry = "https://gitea.insleker.org/api/packages/inkr_org/pypi/simple/" }
 dependencies = [
     { name = "kicad-libtable" },
     { name = "kicad-pcm" },
     { name = "packaging" },
 ]
-sdist = { url = "https://gitea.insleker.org/api/packages/inkr_org/pypi/files/kippm/0.3.1/kippm-0.3.1.tar.gz", hash = "sha256:098627d052b4be48d71bdf875be7810798b29c6a739d0274d9df9155117c1d95" }
+sdist = { url = "https://gitea.insleker.org/api/packages/inkr_org/pypi/files/kippm/0.4.1/kippm-0.4.1.tar.gz", hash = "sha256:49bad7e300eca079c690ebd9608792a3b1ed2851b727ee41a66e29f15bf23279" }
 wheels = [
-    { url = "https://gitea.insleker.org/api/packages/inkr_org/pypi/files/kippm/0.3.1/kippm-0.3.1-py3-none-any.whl", hash = "sha256:06f7f10659be665868bf3e4666f1c4ef8249ca67a072c7faf1728db66bfa8664" },
+    { url = "https://gitea.insleker.org/api/packages/inkr_org/pypi/files/kippm/0.4.1/kippm-0.4.1-py3-none-any.whl", hash = "sha256:fe73fa097ba6fa4f6ea4ae388a6dc317ed74e52d2d52ebf0ed2073b83246cb96" },
 ]
 
 [[package]]

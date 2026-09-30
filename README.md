@@ -38,6 +38,66 @@ uv run python -m inkibox.scripts.toggle_copper_zone off
 # uv run python -m inkibox.scripts.clear_tracks_vias
 ```
 
+## headless updates (`inkibox update`, `inkibox check`)
+
+KiCad's three update actions, run from the command line in a fixed order and with options
+the repo declares, instead of whatever each machine's KiCad dialogs remember:
+
+```bash
+uv run inkibox update             # Update Symbols from Library -> Update PCB from Schematic
+                                  #   -> Update Footprints from Library; writes changed files
+uv run inkibox update --dry-run   # report only
+uv run inkibox update --only pcb  # a subset: symbols, pcb, footprints
+uv run inkibox check              # kippm sync, nothing left to update, footprint links,
+                                  #   ERC, DRC with schematic parity, kippm doctor, and no
+                                  #   tracked file changed by any of it (CI, pre-commit)
+uv run inkibox options            # the effective options
+```
+
+The files are edited in place: every sheet and the board are first brought to the current
+format by `kicad-cli sch/pcb upgrade` (so a file is never half KiCad 9, half KiCad 10),
+libraries are read through `kicad-cli sym/fp upgrade` (cached by hash) so embedded copies
+are exactly what KiCad would embed, and only the items that change are rewritten, in
+KiCad's own layout. A design that is up to date is not touched. On designs KiCad itself had
+just updated, all three steps produce byte-identical files.
+
+Options, with the defaults fixed in `inkibox.update.options` (the safe set: the schematic
+owns footprint assignments, the board owns text placement):
+
+```toml
+[tool.inkibox.update.symbols]       # Update Symbols from Library
+shape_and_pins = true               # embedded copy, pins
+keywords = true                     # ki_keywords / ki_fp_filters
+field_text = false                  # KiCad's default is on: it swaps footprints chosen in
+                                    # the design back to the library default
+update_references = false
+update_values = false
+reset_empty_fields = false
+remove_extra_fields = false
+attributes = false                  # DNP / in BOM / on board from the library
+alternate_pins = false
+custom_power = false
+
+[tool.inkibox.update.pcb]           # Update PCB from Schematic (link by UUID path)
+replace_footprints = true
+delete_unused_footprints = false
+remove_extra_fields = false
+link_unlinked = true                # a footprint with no path joins the symbol with its
+                                    # reference (KiCad would add a second footprint)
+
+[tool.inkibox.update.footprints]    # Update Footprints from Library
+remove_extra_texts = false
+text_content = false
+fabrication_attributes = true       # smd/through_hole…; DNP/BOM/pos stay with the schematic
+clearance_overrides = true
+models_3d = true
+```
+
+`--set footprints.models_3d=false` overrides one on the command line. The options that only
+move or restyle text (field visibilities/effects/positions, pin text visibility, footprint
+text layers/effects/positions) and re-linking by reference are not implemented headless:
+setting one is an error, so a design never depends on them silently.
+
 ## file-based generation (`inkibox.kicad`)
 
 Besides the `kipy` scripts that drive a running KiCad, `inkibox.kicad` writes KiCad 10
