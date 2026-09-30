@@ -48,8 +48,8 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: uv sync --locked
-      # no test suite yet: at least import the headless generator (pulls in kippm)
-      - run: uv run python -c "import inkibox.kicad"
+      # unit tests; the kicad-cli end-to-end test skips on runners without KiCad
+      - run: uv run pytest -q
       - run: uv build
       - if: matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

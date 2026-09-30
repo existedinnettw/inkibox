@@ -45,7 +45,7 @@ jobs:
             echo "tag ${GITHUB_REF_NAME} != v${version} in pyproject.toml"; exit 1; }
 
       - run: uv sync --locked
-      - run: uv run python -c "import inkibox.kicad"
+      - run: uv run pytest -q
       - run: uv build
 
       - name: Publish to the Gitea PyPI index

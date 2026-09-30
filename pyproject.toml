@@ -1,7 +1,7 @@
 [project]
     name = "inkibox"
-    version = "0.1.0"
-    description = "Add your description here"
+    version = "0.2.0"
+    description = "KiCad toolbox: headless Update Symbols / Update PCB / Update Footprints (inkibox update, inkibox check) and file-based design generation"
     readme = "README.md"
     authors = [{ name = "insleker", email = "bkinnightskytw@gmail.com" }]
     requires-python = ">=3.12"
@@ -10,7 +10,7 @@
         "kicad-python>=0.5.0",
         "kicad-sch-api>=0.5.6",
         "kikit>=1.7.2",
-        "kippm>=0.3.1",
+        "kippm>=0.4.1",
         "sexpdata>=1.0.2",
     ]
 
@@ -25,8 +25,11 @@
 
 
     [project.scripts]
-        inkibox = "inkibox:main"
+        inkibox = "inkibox.cli:main"
 
 [build-system]
     requires = ["uv_build>=0.10.8,<0.13.0"]
     build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+    testpaths = ["tests"]
