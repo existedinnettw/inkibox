@@ -1,4 +1,5 @@
-"""Small helpers over ``kicad_libtable.sexpr`` (sexpdata lists) for building KiCad files."""
+"""Small helpers over sexpdata lists for building KiCad files; written out in KiCad's own
+layout by :func:`to_pretty` (through :mod:`inkibox.kicad.sfile`)."""
 
 from __future__ import annotations
 
@@ -7,16 +8,69 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from kicad_libtable.sexpr import (
-    Node,
-    atom_text,
-    child,
-    children,
-    head,
-    parse_one,
-    to_pretty,
-)
+import sexpdata
 from sexpdata import Symbol
+
+from . import sfile
+
+Node = list  # a KiCad list: [Symbol(head), item, …]
+
+
+def parse_one(text: str) -> Node:
+    """The single top-level list of ``text`` (bare ``t``/``nil`` stay symbols)."""
+    forms = [
+        f for f in sexpdata.parse(text, nil=None, true=None) if isinstance(f, list)
+    ]
+    if len(forms) != 1:
+        raise ValueError(f"expected one top-level list, found {len(forms)}")
+    return forms[0]
+
+
+def head(node: Any) -> str | None:
+    if isinstance(node, list) and node and isinstance(node[0], Symbol):
+        return node[0].value()
+    return None
+
+
+def atom_text(item: Any) -> str:
+    """An atom's value as text, without quotes."""
+    if isinstance(item, Symbol):
+        return item.value()
+    if isinstance(item, str):
+        return item
+    return sfile.number(item).raw if isinstance(item, (int, float)) else str(item)
+
+
+def children(node: Node, name: str) -> list[Node]:
+    return [i for i in node[1:] if isinstance(i, list) and head(i) == name]
+
+
+def child(node: Node, name: str) -> Node | None:
+    found = children(node, name)
+    return found[0] if found else None
+
+
+def _to_sfile(node: Any) -> sfile.Node | sfile.Atom:
+    if isinstance(node, list):
+        items = [_to_sfile(i) for i in node[1:]]
+        return sfile.Node(atom_text(node[0]), items)
+    if isinstance(node, Symbol):
+        return sfile.symbol(node.value())
+    if isinstance(node, str):
+        return sfile.string(node)
+    if isinstance(node, bool):
+        return sfile.symbol("yes" if node else "no")
+    if isinstance(node, (int, float)):
+        return sfile.number(node)
+    return sfile.symbol(str(node))
+
+
+def to_pretty(node: Node, indent: int = 0) -> str:
+    """``node`` in the layout KiCad 10 writes (see :func:`inkibox.kicad.sfile.format_node`)."""
+    nd = _to_sfile(node)
+    assert isinstance(nd, sfile.Node)
+    return "\t" * indent + sfile.format_node(nd, indent)
+
 
 __all__ = [
     "Node",
@@ -62,7 +116,7 @@ def parse_file(path: Path) -> Node:
 
 def write_pretty(path: Path, node: Node) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(to_pretty(node) + "\n", encoding="utf-8")
+    sfile.write_text(path, to_pretty(node) + "\n")
 
 
 def clone(node: Node) -> Node:

@@ -4,8 +4,8 @@ scripts as KiCad toolbox
 
 ## setup
 
-kippm and its libraries come from the org's Gitea PyPI index: copy `.env.example` to `.env`,
-fill in a Gitea token and load it (`set -a; . ./.env; set +a`, or direnv) before `uv sync`.
+Every dependency comes from PyPI; `kicad-cli` (KiCad 10) must be on PATH for `inkibox update`
+and `inkibox check`. Publishing to the org's Gitea index is by tag (`release.yml`).
 
 ```bash
 uv sync
@@ -48,11 +48,15 @@ uv run inkibox update             # Update Symbols from Library -> Update PCB fr
                                   #   -> Update Footprints from Library; writes changed files
 uv run inkibox update --dry-run   # report only
 uv run inkibox update --only pcb  # a subset: symbols, pcb, footprints
-uv run inkibox check              # kippm sync, nothing left to update, footprint links,
-                                  #   ERC, DRC with schematic parity, kippm doctor, and no
+uv run inkibox check              # kippm sync*, nothing left to update, footprint links,
+                                  #   ERC, DRC with schematic parity, kippm doctor*, and no
                                   #   tracked file changed by any of it (CI, pre-commit)
 uv run inkibox options            # the effective options
 ```
+
+\* for [kippm](https://github.com/existedinnettw/KIPPM) projects (`build-backend = "kippm"`),
+run as a program from the project's environment; inkibox does not depend on kippm, and
+needs only `kicad-cli` besides its Python dependencies.
 
 The files are edited in place: every sheet and the board are first brought to the current
 format by `kicad-cli sch/pcb upgrade` (so a file is never half KiCad 9, half KiCad 10),
@@ -106,7 +110,7 @@ by [kippm](https://github.com/existedinnettw/KIPPM):
 
 | Module | Does |
 |---|---|
-| `inkibox.kicad.Libraries` | resolves `nick:item` through the project tables and KiCad's global tables (KiCad path variables via `kippm.kicadenv`); loads symbols flattened (`extends` resolved) and footprints |
+| `inkibox.kicad.Libraries` | resolves `nick:item` through the project tables and KiCad's global tables (KiCad path variables from the environment, `kicad_common.json` and the `kicad-cli` wrapper: `inkibox.kicad.tables`); loads symbols flattened (`extends` resolved) and footprints |
 | `inkibox.kicad.Schematic` | places symbols, labels pins (stub + local label), hangs power symbols, marks no-connects; tracks the KiCad net name of every pin |
 | `inkibox.kicad.Board` | outline, footprints from libraries with nets on their pads (from the schematic symbol), tracks, vias, zones; `kicad-cli pcb drc --schematic-parity` sees no mismatch |
 | `inkibox.kicad.GridRouter` | a two-layer Manhattan grid router (Dijkstra, layer direction preference, via cost) honouring clearance, hole-to-hole and edge rules; reports what it cannot route |

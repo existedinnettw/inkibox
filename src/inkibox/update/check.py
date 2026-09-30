@@ -1,5 +1,8 @@
 """``inkibox check``: the design is up to date, clean, and stays unchanged.
 
+The kippm steps run only for kippm projects (``build-backend = "kippm"``) and call kippm as
+a program; inkibox itself does not depend on it.
+
 1. ``kippm sync``                  3rd/ links and library-table rows (kippm projects)
 2. ``inkibox update --dry-run``     nothing left to update (symbols, board, footprints)
 3. footprint links                  every footprint linked to its symbol by UUID path
@@ -15,7 +18,9 @@ change nothing either.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -50,8 +55,22 @@ def uses_kippm(project_dir: Path) -> bool:
     return backend in ("kippm", "kippm.backend")
 
 
+def kippm_command() -> list[str] | None:
+    """How to run kippm here, without importing it (inkibox does not depend on kippm):
+    the project environment's ``python -m kippm``, else ``kippm`` on PATH."""
+    if importlib.util.find_spec("kippm") is not None:
+        return [sys.executable, "-m", "kippm"]
+    exe = shutil.which("kippm")
+    return [exe] if exe else None
+
+
 def _kippm(project_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return _run([sys.executable, "-m", "kippm", *args], project_dir)
+    cmd = kippm_command()
+    if cmd is None:
+        raise RuntimeError(
+            "kippm is not installed here (add it to the project's dev dependencies)"
+        )
+    return _run([*cmd, *args], project_dir)
 
 
 def step_sync(project_dir: Path) -> list[str]:
