@@ -5,6 +5,7 @@ from __future__ import annotations
 from conftest import R_FOOTPRINT, FakeLibs
 
 from inkibox.kicad.sfile import Node, SFile, format_node, parse
+from inkibox.kicad.sfile import write_text as write_lf
 from inkibox.update.footprints import exchange, place, same_footprint, update_footprints
 from inkibox.update.options import FootprintOptions
 
@@ -130,10 +131,11 @@ def test_exchange_of_an_up_to_date_footprint_is_a_no_op(tmp_path):
     Then the first update may change it, the second changes nothing
     """
     pcb_path = tmp_path / "b.kicad_pcb"
-    pcb_path.write_text(
+    write_lf(
+        pcb_path,
         "(kicad_pcb\n\t(version 20260206)\n\t"
         + format_node(board_footprint(), 1)
-        + "\n)\n"
+        + "\n)\n",
     )
     libs = FakeLibs()
     first = SFile.load(pcb_path)
@@ -153,8 +155,9 @@ def test_library_change_reaches_the_board(tmp_path):
     fp = board_footprint()
     up_to_date = exchange(fp, parse(R_FOOTPRINT), LIB_ID, FootprintOptions(), copper=2)
     pcb_path = tmp_path / "b.kicad_pcb"
-    pcb_path.write_text(
-        "(kicad_pcb\n\t(version 20260206)\n\t" + format_node(up_to_date, 1) + "\n)\n"
+    write_lf(
+        pcb_path,
+        "(kicad_pcb\n\t(version 20260206)\n\t" + format_node(up_to_date, 1) + "\n)\n",
     )
     libs = FakeLibs(
         footprints={LIB_ID: R_FOOTPRINT.replace("(size 0.8 0.95)", "(size 0.9 0.95)")}

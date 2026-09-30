@@ -8,6 +8,7 @@ from conftest import FakeLibs
 from test_footprints import LIB_ID, board_footprint
 
 from inkibox.kicad.sfile import SFile, format_node
+from inkibox.kicad.sfile import write_text as write_lf
 from inkibox.update.netlist import Component, Pin
 from inkibox.update.options import FootprintOptions, PcbOptions
 from inkibox.update.pcb import update_pcb
@@ -34,11 +35,12 @@ def component(**over) -> Component:
 def board(tmp_path: Path, *footprints: str, extra: str = "") -> SFile:
     p = tmp_path / "x.kicad_pcb"
     body = "".join("\n\t" + f for f in footprints)
-    p.write_text(
+    write_lf(
+        p,
         "(kicad_pcb\n\t(version 20260206)"
         + body
         + extra
-        + '\n\t(gr_rect\n\t\t(start 0 0)\n\t\t(end 50 40)\n\t\t(layer "Edge.Cuts")\n\t)\n)\n'
+        + '\n\t(gr_rect\n\t\t(start 0 0)\n\t\t(end 50 40)\n\t\t(layer "Edge.Cuts")\n\t)\n)\n',
     )
     return SFile.load(p)
 

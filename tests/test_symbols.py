@@ -7,6 +7,7 @@ from pathlib import Path
 from conftest import R_SYMBOL, FakeLibs
 
 from inkibox.kicad.sfile import SFile, format_node, parse
+from inkibox.kicad.sfile import write_text as write_lf
 from inkibox.update.options import SymbolOptions
 from inkibox.update.symbols import fields_of, update_symbols
 
@@ -64,7 +65,7 @@ def schematic(tmp_path: Path, embedded: str = R_SYMBOL, pins: str = '"1" "2"') -
 )
 """
     p = tmp_path / "x.kicad_sch"
-    p.write_text(text)
+    write_lf(p, text)
     return SFile.load(p)
 
 

@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from inkibox.kicad import Board, Libraries, Schematic
+from inkibox.kicad.sfile import write_text as write_lf
 from inkibox.update import update_project
 from inkibox.update.options import UpdateOptions
 
@@ -98,8 +99,9 @@ def test_update_is_idempotent_and_follows_the_schematic(tmp_path: Path):
     assert drc_parity(project) == []
 
     sch = project / "demo.kicad_sch"
-    sch.write_text(
-        sch.read_text().replace('(property "Value" "22k"', '(property "Value" "47k"')
+    write_lf(
+        sch,
+        sch.read_text().replace('(property "Value" "22k"', '(property "Value" "47k"'),
     )
     third = update_project(project, opts)
     assert "[pcb] R2: Value '22k' -> '47k'" in third.report.changes

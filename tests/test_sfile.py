@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from inkibox.kicad.sfile import SFile, format_node, node, number, parse, string
+from inkibox.kicad.sfile import write_text as write_lf
 
 FOOTPRINT = """(footprint "R_0603"
 \t(layer "F.Cu")
@@ -53,7 +54,7 @@ def test_every_item_formats_back_to_its_source():
 
 def test_unchanged_file_renders_byte_identical(tmp_path: Path):
     p = tmp_path / "x.kicad_mod"
-    p.write_text(FOOTPRINT)
+    write_lf(p, FOOTPRINT)
     f = SFile.load(p)
     assert f.render() == FOOTPRINT
     assert not f.save()
@@ -66,7 +67,7 @@ def test_a_change_is_spliced_in_and_the_rest_is_kept(tmp_path: Path):
     Then only that line differs, and "12.000000" and the escapes survive
     """
     p = tmp_path / "x.kicad_mod"
-    p.write_text(FOOTPRINT)
+    write_lf(p, FOOTPRINT)
     f = SFile.load(p)
     pad = f.root.child("pad")
     assert pad is not None
