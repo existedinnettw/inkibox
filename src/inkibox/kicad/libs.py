@@ -6,10 +6,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kicad_libtable import load_all_tables
-from kippm.kicad import global_table_expanded
-from kippm.kicadenv import expand
-
 from .sexpr import (
     Node,
     atom_text,
@@ -21,6 +17,7 @@ from .sexpr import (
     parse_file,
     set_atom,
 )
+from .tables import library_paths
 
 
 class LibraryError(RuntimeError):
@@ -32,7 +29,7 @@ class Libraries:
     """Library tables of a KiCad project plus the global ones.
 
     ``${KIPRJMOD}`` expands to ``project_dir``; KiCad's own variables come from
-    :mod:`kippm.kicadenv` (environment, ``kicad_common.json``, ``kicad-cli`` wrapper).
+    :mod:`inkibox.kicad.tables` (environment, ``kicad_common.json``, ``kicad-cli`` wrapper).
     """
 
     project_dir: Path
@@ -42,30 +39,8 @@ class Libraries:
 
     def __post_init__(self) -> None:
         self.project_dir = self.project_dir.resolve()
-        tables = load_all_tables(self.project_dir)
-        for kind, target in (
-            ("symbol", self.symbol_libs),
-            ("footprint", self.footprint_libs),
-        ):
-            for row in tables[kind].rows:
-                if row.type == "KiCad":
-                    p = self._expand(row.uri)
-                    if p is not None:
-                        target[row.name] = p
-            glob = global_table_expanded(kind)
-            if glob is not None:
-                for row in glob.rows:
-                    if row.type == "KiCad" and row.name not in target:
-                        p = self._expand(row.uri)
-                        if p is not None:
-                            target[row.name] = p
-
-    def _expand(self, uri: str) -> Path | None:
-        text = uri.replace("${KIPRJMOD}", str(self.project_dir)).replace(
-            "$(KIPRJMOD)", str(self.project_dir)
-        )
-        out = expand(text)
-        return Path(out) if out is not None else None
+        self.symbol_libs.update(library_paths(self.project_dir, "symbol"))
+        self.footprint_libs.update(library_paths(self.project_dir, "footprint"))
 
     # ------------------------------------------------------------------ symbols
 

@@ -10,8 +10,6 @@ import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kippm.board import rotate
-
 from .libs import Libraries
 from .schematic import PlacedSymbol
 from .sexpr import (
@@ -538,6 +536,16 @@ class Board:
 
     def write(self, path: Path) -> None:
         write_pretty(path, self.to_node())
+
+
+def rotate(x: float, y: float, angle_deg: float) -> tuple[float, float]:
+    """A point turned like KiCad's ``RotatePoint`` (y down, positive angles counter-clockwise
+    on screen)."""
+    if angle_deg % 360 == 0:
+        return x, y
+    a = math.radians(angle_deg)
+    c, s = math.cos(a), math.sin(a)
+    return x * c + y * s, -x * s + y * c
 
 
 def _rotate_text(item: Node, rot: float) -> None:
