@@ -107,9 +107,13 @@ def step_links(project_dir: Path) -> list[str]:
             instances = sym.child("instances")
             if instances is None:
                 continue
-            for proj in instances.children("project"):
-                if proj.atom(0) not in (project, None):
-                    continue
+            # KiCad finds a symbol's instance by sheet path whatever project it is filed
+            # under (a pasted symbol carries `(project "")` or the source project's name);
+            # this project's entries go last so they win on the same path
+            projs = sorted(
+                instances.children("project"), key=lambda p: p.atom(0) == project
+            )
+            for proj in projs:
                 for path in proj.children("path"):
                     parts = [p for p in (path.atom(0) or "").split("/") if p]
                     if parts and parts[0] == root_uuid:
