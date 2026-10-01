@@ -5,7 +5,9 @@ A board keeps a placed footprint in the footprint's own frame: geometry is local
 unrotated, only the angles of pads and texts are absolute (library angle plus the
 footprint's rotation); a footprint on the back is mirrored top to bottom (``y`` negated,
 ``F.*`` layers become ``B.*``, pad angles negated, text angles ``180 - a``, texts
-``(justify mirror)``). :func:`place` turns a library footprint into that form.
+``(justify mirror)``). Zones are the exception: a board stores a footprint's zones in
+board coordinates, on the board's copper layers only. :func:`place` turns a library
+footprint into that form.
 
 :func:`exchange` follows KiCad 10's ``PCB_EDIT_FRAME::ExchangeFootprint`` for the options
 in :class:`~inkibox.update.options.FootprintOptions`: position, side, rotation, lock, links
@@ -20,6 +22,7 @@ board that is up to date is not rewritten.
 
 from __future__ import annotations
 
+import math
 import re
 
 from ..kicad.sexpr import stable_uuid
@@ -55,7 +58,7 @@ GRAPHICS = (
     "barcode",
     "table",
 )
-UNSUPPORTED_ITEMS = ("zone", "dimension", "fp_dimension")
+UNSUPPORTED_ITEMS = ("dimension", "fp_dimension")
 KNOWN = frozenset(
     (
         *GRAPHICS,
@@ -63,6 +66,7 @@ KNOWN = frozenset(
         *BOARD_LINKS,
         *LIB_HEADER,
         *UNSUPPORTED_ITEMS,
+        "zone",
         "layer",
         "uuid",
         "at",
@@ -210,15 +214,63 @@ def _set_angle(at: Node, angle: float, *, keep_zero: bool) -> None:
     at.items = new + [i for i in at.items if isinstance(i, Node)]
 
 
-def place(lib_fp: Node, *, side: str, rotation: float, copper: int) -> list[Node]:
+def _board_layers(copper: int) -> set[str]:
+    inner = {f"In{i}.Cu" for i in range(1, copper - 1)}
+    return {"F.Cu", "B.Cu", *inner}
+
+
+def _place_zone(
+    zone: Node, at: tuple[float, float], rotation: float, copper: int
+) -> None:
+    """A (flipped) footprint zone to board coordinates: polygon points turned by the
+    footprint's rotation (KiCad's ``RotatePoint``, y down) and moved to its position;
+    copper layers the board does not have dropped, as KiCad does on load."""
+    a = math.radians(rotation)
+    c, s = math.cos(a), math.sin(a)
+    for sub in zone.walk():
+        if sub.head == "xy":
+            atoms = sub.atoms()
+            x, y = _num(atoms[0]), _num(atoms[1])
+            sub.set_atom(0, number(round(at[0] + x * c + y * s, 6) + 0.0))
+            sub.set_atom(1, number(round(at[1] - x * s + y * c, 6) + 0.0))
+    layers = zone.child("layers")
+    if layers is not None:
+        keep = _board_layers(copper)
+        layers.items = [
+            i
+            for i in layers.items
+            if not (
+                isinstance(i, Atom)
+                and i.is_string
+                and re.fullmatch(r"(F|B|In\d+)\.Cu", i.text)
+                and i.text not in keep
+            )
+        ]
+
+
+def place(
+    lib_fp: Node,
+    *,
+    side: str,
+    rotation: float,
+    copper: int,
+    origin: tuple[float, float] = (0.0, 0.0),
+) -> list[Node]:
     """The items of a library footprint (a fresh copy) as a board stores them for a
-    footprint on ``side`` (``F.Cu``/``B.Cu``) rotated by ``rotation`` degrees."""
+    footprint on ``side`` (``F.Cu``/``B.Cu``) rotated by ``rotation`` degrees at
+    ``origin`` (which only zones depend on)."""
     back = side == "B.Cu"
     out: list[Node] = []
     for item in lib_fp.children():
         if item.head in LIB_HEADER:
             continue
         it = item.copy()
+        if it.head == "zone":
+            if back:
+                _flip_item(it, copper)
+            _place_zone(it, origin, rotation, copper)
+            out.append(it)
+            continue
         is_pad = it.head == "pad"
         is_text = _texts(it)
         at = it.child("at") if (is_pad or is_text) else None
@@ -265,7 +317,8 @@ def exchange(
     side = existing.value("layer", "F.Cu") or "F.Cu"
     at = existing.child("at")
     rotation = _num(at.atoms()[2]) if at is not None and len(at.atoms()) >= 3 else 0.0
-    placed = place(lib_fp, side=side, rotation=rotation, copper=copper)
+    pos = (_num(at.atoms()[0]), _num(at.atoms()[1])) if at is not None else (0.0, 0.0)
+    placed = place(lib_fp, side=side, rotation=rotation, copper=copper, origin=pos)
     fp_uuid = existing.value("uuid") or ref_of(existing)
 
     lib_fields = [
@@ -366,6 +419,7 @@ def exchange(
             out.items.append(c)
     out.items += graphics
     out.items += pads
+    out.items += _zones(existing, [i for i in placed if i.head == "zone"], fp_uuid)
     out.items += [i for i in placed if i.head == "group"]
     c = lib_child("embedded_fonts")
     if c is not None:
@@ -389,6 +443,25 @@ def _with_uuid(item: Node, *parts: str) -> Node:
     return item
 
 
+# what KiCad writes after a pad's (net) (pinfunction) (pintype): the pad's own overrides,
+# its custom shape and the uuid
+_PAD_AFTER_NET = frozenset(
+    (
+        "die_length",
+        "die_delay",
+        *CLEARANCE,
+        "thermal_bridge_width",
+        "thermal_bridge_angle",
+        "zone_layer_connections",
+        "teardrops",
+        "options",
+        "primitives",
+        "tenting",
+        "uuid",
+    )
+)
+
+
 def _pads(existing: Node, lib_pads: list[Node], fp_uuid: str) -> list[Node]:
     """Library pads with the board's nets and pin data, matched by pad number in order."""
     old: dict[str, list[Node]] = {}
@@ -410,7 +483,14 @@ def _pads(existing: Node, lib_pads: list[Node], fp_uuid: str) -> list[Node]:
         )
         carry = [c for c in carry if c is not None]
         uid = pad.child("uuid")
-        index = pad.items.index(uid) if uid is not None else len(pad.items)
+        index = next(
+            (
+                k
+                for k, item in enumerate(pad.items)
+                if isinstance(item, Node) and item.head in _PAD_AFTER_NET
+            ),
+            len(pad.items),
+        )
         pad.items[index:index] = carry
         prev_uid = prev.child("uuid") if prev is not None else None
         uid_new = prev_uid or node("uuid", stable_uuid(fp_uuid, "pad", num, str(i)))
@@ -419,6 +499,41 @@ def _pads(existing: Node, lib_pads: list[Node], fp_uuid: str) -> list[Node]:
         else:
             pad.items.append(uid_new)
         out.append(pad)
+    return out
+
+
+_ZONE_FILL = ("filled_polygon", "filled_areas_thickness")
+
+
+def _zone_key(zone: Node) -> tuple:
+    bare = zone.copy()
+    bare.items = [
+        i
+        for i in bare.items
+        if not (isinstance(i, Node) and i.head in ("uuid", *_ZONE_FILL))
+    ]
+    return _canon(bare)
+
+
+def _zones(existing: Node, lib_zones: list[Node], fp_uuid: str) -> list[Node]:
+    """Library zones, matched in order with the board's: an unchanged one stays as the
+    board has it (fill included), a changed one keeps the board's uuid."""
+    old = existing.children("zone")
+    out: list[Node] = []
+    for i, z in enumerate(lib_zones):
+        prev = old[i] if i < len(old) else None
+        if prev is not None and _zone_key(prev) == _zone_key(z):
+            out.append(prev)
+            continue
+        uid = z.child("uuid")
+        new_uid = (prev.child("uuid") if prev is not None else None) or node(
+            "uuid", stable_uuid(fp_uuid, "zone", str(i))
+        )
+        if uid is not None:
+            z.replace_child(uid, new_uid)
+        else:
+            z.items.append(new_uid)
+        out.append(z)
     return out
 
 

@@ -184,3 +184,113 @@ def test_same_footprint_ignores_uuids_and_order():
     assert same_footprint(a, b)  # KiCad re-sorts repeated items itself
     c = parse(R_FOOTPRINT.replace("(size 0.8 0.95)", "(size 0.9 0.95)", 1))
     assert not same_footprint(a, c)
+
+
+KEEPOUT = """\t(zone
+\t\t(layers "F.Cu" "B.Cu" "In1.Cu" "In2.Cu")
+\t\t(uuid "11111111-0000-0000-0000-0000000000aa")
+\t\t(hatch full 0.508)
+\t\t(connect_pads
+\t\t\t(clearance 0)
+\t\t)
+\t\t(min_thickness 0.254)
+\t\t(keepout
+\t\t\t(tracks not_allowed)
+\t\t\t(vias not_allowed)
+\t\t\t(pads not_allowed)
+\t\t\t(copperpour not_allowed)
+\t\t\t(footprints not_allowed)
+\t\t)
+\t\t(polygon
+\t\t\t(pts
+\t\t\t\t(xy -2 -1) (xy 2 -1) (xy 2 -3) (xy -2 -3)
+\t\t\t)
+\t\t)
+\t)
+"""
+R_WITH_KEEPOUT = R_FOOTPRINT.replace(
+    "\t(embedded_fonts", KEEPOUT + "\t(embedded_fonts", 1
+)
+
+
+def _zone_points(zone: Node) -> list[tuple[str, str]]:
+    return [
+        (xy.atoms()[0].raw, xy.atoms()[1].raw) for xy in zone.walk() if xy.head == "xy"
+    ]
+
+
+def test_zones_go_to_board_coordinates_on_the_board_layers():
+    """
+    Given a library footprint with a keepout zone on four copper layers
+    When it is placed on a two-layer board at (10, 20) rotated by 90
+    Then the polygon is turned (y down, counter-clockwise) and moved there
+    And only the board's copper layers remain
+    """
+    assert "(zone" in R_WITH_KEEPOUT
+    items = place(
+        parse(R_WITH_KEEPOUT), side="F.Cu", rotation=90, copper=2, origin=(10, 20)
+    )
+    zone = next(i for i in items if i.head == "zone")
+    assert _zone_points(zone) == [("9", "22"), ("9", "18"), ("7", "18"), ("7", "22")]
+    assert [a.text for a in zone.child("layers").atoms()] == ["F.Cu", "B.Cu"]  # type: ignore[union-attr]
+
+
+def test_zones_on_the_back_are_mirrored_first():
+    items = place(
+        parse(R_WITH_KEEPOUT), side="B.Cu", rotation=0, copper=4, origin=(10, 20)
+    )
+    zone = next(i for i in items if i.head == "zone")
+    assert _zone_points(zone) == [("8", "21"), ("12", "21"), ("12", "23"), ("8", "23")]
+    assert [a.text for a in zone.child("layers").atoms()] == [
+        "B.Cu",
+        "F.Cu",
+        "In2.Cu",
+        "In1.Cu",
+    ]  # type: ignore[union-attr]
+
+
+def test_footprint_with_a_zone_updates_once_then_stays(tmp_path):
+    """
+    Given a board footprint whose library footprint has a keepout zone
+    When footprints are updated twice
+    Then the zone lands after the pads in board coordinates, and the second update is a
+    no-op
+    """
+    pcb_path = tmp_path / "b.kicad_pcb"
+    write_lf(
+        pcb_path,
+        "(kicad_pcb\n\t(version 20260206)\n\t"
+        + format_node(board_footprint(rot="0"), 1)
+        + "\n)\n",
+    )
+    libs = FakeLibs(footprints={LIB_ID: R_WITH_KEEPOUT})
+    first = SFile.load(pcb_path)
+    report = update_footprints(first, libs, FootprintOptions())  # type: ignore[arg-type]
+    assert report.errors == [] and report.changes
+    first.save()
+    second = SFile.load(pcb_path)
+    fp = second.root.child("footprint")
+    heads = [c.head for c in fp.children()]  # type: ignore[union-attr]
+    assert heads.index("zone") > max(i for i, h in enumerate(heads) if h == "pad")
+    zone = fp.child("zone")  # type: ignore[union-attr]
+    assert _zone_points(zone)[0] == ("8", "19")  # type: ignore[arg-type]
+    report = update_footprints(second, libs, FootprintOptions())  # type: ignore[arg-type]
+    assert report.changes == [] and not second.changed()
+
+
+def test_pad_nets_go_before_the_pad_overrides():
+    """
+    Given a library pad with its own zone connection (a thermal via of an exposed pad)
+    When the footprint is exchanged
+    Then net and pin data sit before (zone_connect), where KiCad writes them
+    """
+    lib = R_FOOTPRINT.replace(
+        '\t\t(layers "F.Cu" "F.Mask" "F.Paste")\n',
+        '\t\t(layers "F.Cu" "F.Mask" "F.Paste")\n\t\t(zone_connect 2)\n',
+        1,
+    )
+    assert "(zone_connect 2)" in lib
+    new = exchange(board_footprint(), parse(lib), LIB_ID, FootprintOptions(), copper=2)
+    pad = next(c for c in new.children("pad") if c.child("zone_connect") is not None)
+    heads = [c.head for c in pad.children()]
+    assert heads.index("net") < heads.index("pintype") < heads.index("zone_connect")
