@@ -70,16 +70,7 @@ class PlacedPad:
 
     @property
     def radius(self) -> float:
-        """Half the longer side: the circle a pad's copper fits in only for round pads; see
-        :attr:`outer_radius`."""
         return max(self.size) / 2
-
-    @property
-    def outer_radius(self) -> float:
-        """Radius of the circle through the pad's corners (all of its copper is inside)."""
-        if self.shape in ("circle", "oval"):
-            return max(self.size) / 2
-        return math.hypot(*self.size) / 2
 
 
 @dataclass(slots=True)
