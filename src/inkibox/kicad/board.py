@@ -10,6 +10,8 @@ import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from sexpdata import Symbol
+
 from .libs import Libraries
 from .schematic import PlacedSymbol
 from .sexpr import (
@@ -446,6 +448,56 @@ class Board:
             [S("polygon"), [S("pts"), *[[S("xy"), num(x), num(y)] for x, y in pts]]],
         ]
         self.zones.append(node)
+
+    def keepout(
+        self,
+        pts: list[tuple[float, float]],
+        *,
+        layers: tuple[str, ...] = ("F.Cu", "B.Cu"),
+        name: str = "",
+        tracks: bool = False,
+        vias: bool = False,
+        pours: bool = False,
+        pads: bool = True,
+        footprints: bool = True,
+    ) -> None:
+        """A rule area (keepout): what may not be placed inside ``pts`` on ``layers``
+        (``False`` = not allowed). DRC enforces it, and KiCad's Specctra export hands it to
+        Freerouting as a keepout, so ``inkibox route`` respects it too."""
+
+        def rule(ok: bool) -> Symbol:
+            return S("allowed") if ok else S("not_allowed")
+
+        self.zones.append(
+            [
+                S("zone"),
+                [S("layers"), *layers],
+                [S("uuid"), stable_uuid(self.project, "keepout", name, str(pts))],
+                *([[S("name"), name]] if name else []),
+                [S("hatch"), S("edge"), 0.5],
+                [S("connect_pads"), [S("clearance"), 0]],
+                [S("min_thickness"), 0.25],
+                [
+                    S("keepout"),
+                    [S("tracks"), rule(tracks)],
+                    [S("vias"), rule(vias)],
+                    [S("pads"), rule(pads)],
+                    [S("copperpour"), rule(pours)],
+                    [S("footprints"), rule(footprints)],
+                ],
+                [S("placement"), [S("enabled"), S("no")], [S("sheetname"), ""]],
+                [
+                    S("fill"),
+                    [S("thermal_gap"), 0.5],
+                    [S("thermal_bridge_width"), 0.5],
+                    [S("island_removal_mode"), 0],
+                ],
+                [
+                    S("polygon"),
+                    [S("pts"), *[[S("xy"), num(x), num(y)] for x, y in pts]],
+                ],
+            ]
+        )
 
     def text(
         self,

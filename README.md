@@ -102,6 +102,42 @@ move or restyle text (field visibilities/effects/positions, pin text visibility,
 text layers/effects/positions) and re-linking by reference are not implemented headless:
 setting one is an error, so a design never depends on them silently.
 
+## autorouting (`inkibox route`)
+
+```bash
+uv run inkibox route            # route the project's board in place, then DRC it
+uv run inkibox route --keep out # also keep the DSN, SES and Freerouting log in out/
+```
+
+Routes with [Freerouting](https://github.com/freerouting/freerouting) (GPL-3.0, run as a
+separate program; nothing of it is linked into inkibox) and judges the result with KiCad's
+own DRC. Over running `freerouting` by hand it adds what was missing on real boards:
+
+| | without `inkibox route` | with it |
+|---|---|---|
+| Specctra DSN / SES | only KiCad's GUI or its `pcbnew` Python module; `kicad-cli` has no export | found and driven headless: `/usr/bin/python3` (KiCad image, Debian), KiCad's bundled Python (Windows, macOS), the `kicad-cli` wrapper's `PYTHONPATH` (Nix); `INKIBOX_KICAD_PYTHON` / `INKIBOX_PCBNEW_PATH` override |
+| existing copper | Freerouting rips up tracks and vias it finds redundant (a hand-placed GND via on dvsp_5v_pw_b) | locked for the export, kept as drawn |
+| zone nets | a zone becomes a Specctra plane, taken for solid copper; KiCad's fill is cut by other nets' tracks, leaving islands (two GND breaks on ecat_io_b) | `route_zone_nets` connects those nets with tracks; the zone only adds copper |
+| zone fills | stale after the import (`inkibox check` reads the saved fill) | refilled and saved; optional stitching vias, plus one via into every orphaned F.Cu island of the stitched net |
+| clearances | Freerouting's diagonals can end a few nm inside the clearance (a DRC error on dvsp_esp_32-s3_core_b) | `clearance_margin` widens the exported clearances only; per board, as on ecat_io_b the same margin left connections unrouted |
+| project files | pcbnew's save rewrites the `.kicad_pro` (reordered DRC exclusions) | restored: only the board changes |
+| verdict | exits 0 with connections left unrouted | Freerouting's final score and KiCad's DRC (unconnected items, errors); exit 1 if either is not clean |
+| reproducibility | KiCad's import gives the new copper random uuids in a varying order | a pinned release (downloaded once, SHA-256 checked), one optimisation thread, uuids from the copper's content in a fixed order: the same board routes to the same bytes |
+
+Design rules, net-class widths and clearances, pad shapes and rule areas (keepouts) reach
+Freerouting through KiCad's export. Custom DRC rules (`.kicad_dru`) do not: draw the area
+they protect as a keepout (`inkibox.kicad.Board.keepout`), and DRC still checks the rule.
+
+```toml
+[tool.inkibox.route]
+passes = 100                 # Freerouting's maximum auto-routing passes (default 100)
+route_zone_nets = ["GND"]    # connect these with tracks, not through their zones
+clearance_margin = 0.01      # mm added to every clearance while Freerouting routes (default 0)
+stitch = { net = "GND", pitch = 2.54, size = 0.6, drill = 0.3 }  # optional
+```
+
+Needs Java 21+ besides KiCad 10. `FREEROUTING_JAR` or `--jar` use another Freerouting build.
+
 ## file-based generation (`inkibox.kicad`)
 
 Besides the `kipy` scripts that drive a running KiCad, `inkibox.kicad` writes KiCad 10
@@ -112,8 +148,8 @@ by [kippm](https://github.com/existedinnettw/KIPPM):
 |---|---|
 | `inkibox.kicad.Libraries` | resolves `nick:item` through the project tables and KiCad's global tables (KiCad path variables from the environment, `kicad_common.json` and the `kicad-cli` wrapper: `inkibox.kicad.tables`); loads symbols flattened (`extends` resolved) and footprints; a symbol's pins are those of body style 1 (not the De Morgan alternate) |
 | `inkibox.kicad.Schematic` | places symbols, labels pins (stub + local label, optionally with a PWR_FLAG for a supply net named by a label), hangs power symbols, marks no-connects; tracks the KiCad net name of every pin |
-| `inkibox.kicad.Board` | outline, footprints from libraries with nets on their pads (from the schematic symbol), tracks, vias, zones; a footprint's own zones (keepouts) move with it; every uuid is stable, so a regenerated board is byte-identical; `kicad-cli pcb drc --schematic-parity` sees no mismatch |
-| `inkibox.kicad.GridRouter` | a two-layer Manhattan grid router (Dijkstra, layer direction preference, via cost) honouring clearance, hole-to-hole and edge rules; reports what it cannot route |
+| `inkibox.kicad.Board` | outline, footprints from libraries with nets on their pads (from the schematic symbol), tracks, vias, zones, keepouts (rule areas); a footprint's own zones (keepouts) move with it; every uuid is stable, so a regenerated board is byte-identical; `kicad-cli pcb drc --schematic-parity` sees no mismatch |
+| `inkibox.kicad.GridRouter` | a small two-layer grid router, kept for existing scripts; new boards route with `inkibox route` |
 
 ```python
 from inkibox.kicad import Libraries, Schematic, Board
@@ -145,7 +181,6 @@ See `ecat_io_b/scripts/generate.py` for a complete carrier (three modules, termi
 * setup
   * [KiCAD-MCP-Server](https://github.com/mixelpixx/KiCAD-MCP-Server)
 * `inkibox.kicad`
-  * [ ] diagonal (45°) routing and net classes in `GridRouter`
   * [ ] hierarchical sheets in `Schematic`
 
 ## CI / release

@@ -5,6 +5,10 @@ on a uniform grid, one layer prefers horizontal runs and the other vertical, via
 cost extra, previously routed nets and pads are obstacles. Clearances are handled
 by inflating obstacles by the design rules, so the result is DRC-clean for the
 rules it was given; anything it cannot route is reported, never guessed.
+
+For new boards use ``inkibox route`` (Freerouting with KiCad's own rules) instead: this
+router models pads as circles and obstacles for tracks up to 0.4 mm, and is kept as it is
+for the scripts that already use it.
 """
 
 from __future__ import annotations
