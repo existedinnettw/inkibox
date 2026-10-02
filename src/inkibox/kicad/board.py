@@ -64,10 +64,22 @@ class PlacedPad:
     layers: frozenset[str]  # {"F.Cu"}, {"B.Cu"} or both
     net: str | None
     drill: float = 0.0  # hole diameter, 0 for SMD
+    angle: float = (
+        0.0  # orientation on the board (degrees, KiCad's sense), ``size`` before it
+    )
 
     @property
     def radius(self) -> float:
+        """Half the longer side: the circle a pad's copper fits in only for round pads; see
+        :attr:`outer_radius`."""
         return max(self.size) / 2
+
+    @property
+    def outer_radius(self) -> float:
+        """Radius of the circle through the pad's corners (all of its copper is inside)."""
+        if self.shape in ("circle", "oval"):
+            return max(self.size) / 2
+        return math.hypot(*self.size) / 2
 
 
 @dataclass(slots=True)
@@ -362,22 +374,26 @@ class Board:
                 cu,
                 net,
                 drill,
+                (pang + rot) % 360,
             )
             fp.all_pads.append(placed)
             fp.pads.setdefault(number, placed)
-        for item in node[1:]:
-            if isinstance(item, list) and head(item) in (
-                "fp_line",
-                "fp_rect",
-                "fp_arc",
-                "fp_circle",
-                "fp_poly",
-            ):
-                replace_child(
-                    item,
-                    "uuid",
-                    [S("uuid"), stable_uuid(self.project, ref, "gfx", str(id(item)))],
-                )
+        # stable uuids for the graphics and texts, by their place in the footprint: libraries
+        # often ship `fp_text user "${REFERENCE}"` without one, and KiCad would make one up
+        for index, item in enumerate(node):
+            kind = head(item)
+            if kind in ("fp_line", "fp_rect", "fp_arc", "fp_circle", "fp_poly"):
+                key = ("gfx", str(index))
+            elif kind == "fp_text":
+                key = ("fp_text", str(index))
+            elif kind == "zone":
+                key = ("zone", str(index))
+                _place_zone(item, fx, fy, rot)
+            else:
+                continue
+            replace_child(
+                item, "uuid", [S("uuid"), stable_uuid(self.project, ref, *key)]
+            )
         self.footprints.append(fp)
         return fp
 
@@ -559,6 +575,16 @@ def _rotate_text(item: Node, rot: float) -> None:
     x, y = float(a[0]), float(a[1])
     ang = float(a[2]) if len(a) > 2 else 0.0
     replace_child(item, "at", [S("at"), num(x), num(y), num((ang + rot) % 360)])
+
+
+def _place_zone(zone: Node, fx: float, fy: float, rot: float) -> None:
+    """A footprint's own zone (a keepout, a pour) is stored in board coordinates in a
+    .kicad_pcb, unlike the rest of the footprint: move its outline with the footprint."""
+    for poly in children(zone, "polygon"):
+        for pts in children(poly, "pts"):
+            for xy in children(pts, "xy"):
+                x, y = rotate(float(xy[1]), float(xy[2]), rot)
+                xy[1], xy[2] = num(fx + x), num(fy + y)
 
 
 def _insert_after_layers(pad: Node, new: Node, after: str = "layers") -> None:

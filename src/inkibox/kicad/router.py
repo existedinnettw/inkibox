@@ -5,6 +5,11 @@ on a uniform grid, one layer prefers horizontal runs and the other vertical, via
 cost extra, previously routed nets and pads are obstacles. Clearances are handled
 by inflating obstacles by the design rules, so the result is DRC-clean for the
 rules it was given; anything it cannot route is reported, never guessed.
+
+Obstacles are inflated for a reference track half-width (``max(track_width, 0.4) / 2``);
+a wider track additionally needs every cell within the difference to be free, so any width
+keeps its clearance. Pads block by their real shape (rectangles, rounded rectangles and
+ovals at their orientation), not by a circle around them.
 """
 
 from __future__ import annotations
@@ -56,6 +61,7 @@ class GridRouter:
     _holes: list[tuple[float, float, float]] = field(
         default_factory=list
     )  # x, y, drill radius
+    _wide: list[tuple[int, int]] = field(default_factory=list)  # see _set_width
 
     def __post_init__(self) -> None:
         self._w = math.ceil((self.x1 - self.x0) / self.pitch) + 1
@@ -93,6 +99,11 @@ class GridRouter:
     def _layer_index(self, layer: str) -> int:
         return self.layers.index(layer)
 
+    @property
+    def _ref(self) -> float:
+        """Track half-width the obstacles are inflated for."""
+        return max(self.track_width, 0.4) / 2
+
     def _cells_within(self, x: float, y: float, r: float):
         i0, j0 = self.cell(x, y)
         n = math.ceil(r / self.pitch) + 1
@@ -112,19 +123,58 @@ class GridRouter:
         layers: frozenset[str],
         net: str | None,
         drill: float = 0.0,
+        *,
+        size: tuple[float, float] | None = None,
+        angle: float = 0.0,
+        shape: str = "circle",
     ) -> None:
-        """Block cells around a pad for every other net. ``radius`` is the pad's own
-        half-size; clearance and track width are added here. A ``drill`` keeps vias away
+        """Block cells around a pad for every other net. Without ``size`` the pad is a
+        circle of ``radius``; with it, a ``shape`` (rect, roundrect, trapezoid, oval,
+        circle, custom) of ``size`` turned by ``angle`` (KiCad's sense) — the corners of a
+        large rectangular pad reach well past the circle of half its longer side.
+        Clearance and track width are added here. A ``drill`` keeps vias away
         (hole-to-hole and hole clearance rules apply regardless of net)."""
         nid = self.net_id(net) if net else BLOCK
         if drill > 0:
             self._holes.append((x, y, drill / 2))
-        r = radius + self.clearance + max(self.track_width, 0.4) / 2
+        infl = self.clearance + self._ref
+        if size is None or shape == "circle":
+            r0 = radius if size is None else max(size) / 2
+            inside = None
+        else:
+            w, h = size
+            r0 = math.hypot(w, h) / 2
+            a = math.radians(angle)
+            c, s_ = math.cos(a), math.sin(a)
+            if shape == "oval":
+                # a stadium: a segment along the long side, inflated by the short half-size
+                half = abs(w - h) / 2
+                rr = min(w, h) / 2
+
+                def inside(px: float, py: float) -> bool:
+                    u = (px - x) * c - (py - y) * s_
+                    v = (px - x) * s_ + (py - y) * c
+                    if w >= h:
+                        d = math.hypot(max(abs(u) - half, 0.0), v)
+                    else:
+                        d = math.hypot(u, max(abs(v) - half, 0.0))
+                    return d <= rr + infl + 1e-9
+            else:
+
+                def inside(px: float, py: float) -> bool:
+                    # board -> pad frame: the inverse of rotate(x, y, angle)
+                    u = (px - x) * c - (py - y) * s_
+                    v = (px - x) * s_ + (py - y) * c
+                    d = math.hypot(max(abs(u) - w / 2, 0.0), max(abs(v) - h / 2, 0.0))
+                    return d <= infl + 1e-9
+
         for li, layer in enumerate(self.layers):
             if layer not in layers:
                 continue
             g = self._grid[li]
-            for i, j in self._cells_within(x, y, r):
+            for i, j in self._cells_within(x, y, r0 + infl):
+                if inside is not None and not inside(*self.xy(i, j)):
+                    continue
                 cur = g[j * self._w + i]
                 if cur == FREE or (cur != BLOCK and cur != nid and nid == BLOCK):
                     g[j * self._w + i] = nid
@@ -151,6 +201,22 @@ class GridRouter:
                     if x0 <= x <= x1 and y0 <= y <= y1:
                         g[j * self._w + i] = BLOCK
 
+    def add_footprint(self, fp) -> None:
+        """Every pad of a placed footprint (:class:`inkibox.kicad.board.PlacedFootprint`),
+        by its real shape and orientation."""
+        for pad in fp.all_pads:
+            self.add_pad(
+                pad.x,
+                pad.y,
+                pad.radius,
+                pad.layers,
+                pad.net,
+                pad.drill,
+                size=pad.size,
+                angle=pad.angle,
+                shape=pad.shape,
+            )
+
     def _claim(self, g: list[int], idx: int, nid: int) -> None:
         """Copper of ``nid`` is now within clearance of this cell: free cells become ours,
         cells another net reserved for its pad exits become nobody's (BLOCK), so that net
@@ -162,7 +228,7 @@ class GridRouter:
             g[idx] = BLOCK
 
     def _mark_track(self, li: int, i: int, j: int, nid: int, width: float) -> None:
-        r = width / 2 + self.clearance + max(self.track_width, 0.4) / 2 - 1e-6
+        r = width / 2 + self.clearance + self._ref - 1e-6
         g = self._grid[li]
         x, y = self.xy(i, j)
         for ii, jj in self._cells_within(x, y, r):
@@ -195,7 +261,34 @@ class GridRouter:
 
     def _passable(self, li: int, i: int, j: int, nid: int) -> bool:
         v = self._grid[li][j * self._w + i]
-        return v == FREE or v == nid
+        if not (v == FREE or v == nid):
+            return False
+        # a track wider than the reference also needs the cells its extra half-width covers
+        for di, dj in self._wide:
+            ii, jj = i + di, j + dj
+            if not (0 <= ii < self._w and 0 <= jj < self._h):
+                return False
+            v = self._grid[li][jj * self._w + ii]
+            if not (v == FREE or v == nid):
+                return False
+        return True
+
+    def _set_width(self, width: float) -> None:
+        """Cells a track of ``width`` needs free around each of its cells, beyond the one it
+        runs through. Obstacle outlines fall between grid points, so the reach is the extra
+        half-width plus half a cell diagonal (conservative)."""
+        extra = width / 2 - self._ref
+        if extra <= 1e-9:
+            self._wide = []
+            return
+        reach = extra + self.pitch * math.sqrt(0.5)
+        n = math.ceil(reach / self.pitch)
+        self._wide = [
+            (di, dj)
+            for dj in range(-n, n + 1)
+            for di in range(-n, n + 1)
+            if (di or dj) and math.hypot(di, dj) * self.pitch <= reach + 1e-9
+        ]
 
     # ------------------------------------------------------------------ routing
 
@@ -205,6 +298,15 @@ class GridRouter:
         """Connect all terminals of ``net`` (a spanning tree grown terminal by terminal)."""
         width = width or self.track_width
         nid = self.net_id(net)
+        self._set_width(width)
+        try:
+            return self._route(net, nid, terminals, width)
+        finally:
+            self._set_width(self._ref * 2)
+
+    def _route(
+        self, net: str, nid: int, terminals: list[Terminal], width: float
+    ) -> RouteResult:
         segs: list[tuple[float, float, float, float, str]] = []
         vias: list[tuple[float, float]] = []
         if len(terminals) < 2:
@@ -269,6 +371,15 @@ class GridRouter:
         of the same net on the other layer)."""
         width = width or self.track_width
         nid = self.net_id(net)
+        self._set_width(width)
+        try:
+            return self._route_to_via(net, nid, terminal, width, max_len)
+        finally:
+            self._set_width(self._ref * 2)
+
+    def _route_to_via(
+        self, net: str, nid: int, terminal: Terminal, width: float, max_len: float
+    ) -> RouteResult:
         li = self._layer_index(next(iter(terminal.layers)))
         si, sj = self.cell(terminal.x, terminal.y)
         self._grid[li][sj * self._w + si] = nid

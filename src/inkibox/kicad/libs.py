@@ -125,10 +125,16 @@ def _flatten(syms: dict[str, Node], name: str) -> Node:
 
 
 def pin_defs(symbol: Node) -> list[Node]:
-    """All ``(pin …)`` nodes of a flattened library symbol (every unit and body style)."""
+    """The ``(pin …)`` nodes of a flattened library symbol: every unit, body style 1 only.
+
+    Sub-symbols are named ``<name>_<unit>_<style>``; style 0 is common to all styles, 2 is
+    the De Morgan alternate, whose pins may sit elsewhere (the AKL LED and TVS symbols) and
+    which a placed symbol does not show unless asked to."""
     pins: list[Node] = []
     for unit in children(symbol, "symbol"):
-        pins.extend(children(unit, "pin"))
+        style = atom_text(unit[1]).rsplit("_", 1)[-1]
+        if style in ("0", "1") or not style.isdigit():
+            pins.extend(children(unit, "pin"))
     return pins
 
 
