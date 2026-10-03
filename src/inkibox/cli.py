@@ -3,11 +3,13 @@
     inkibox update [DIR] [--dry-run] [--only symbols,pcb,footprints] [--set sec.opt=bool]…
     inkibox check  [DIR] [--set sec.opt=bool]…
     inkibox options [DIR]
+    inkibox route  [DIR] [--passes N] [--jar FREEROUTING.jar] [--keep DIR]
 
 ``update`` runs *Update Symbols from Library*, *Update PCB from Schematic* and *Update
 Footprints from Library* in that order; ``check`` verifies the design is up to date, ERC/DRC
 clean and unchanged by the sequence; ``options`` prints the effective update options
-(defaults, ``[tool.inkibox.update]`` in ``pyproject.toml``, ``--set``).
+(defaults, ``[tool.inkibox.update]`` in ``pyproject.toml``, ``--set``); ``route``
+autoroutes the board with Freerouting (``[tool.inkibox.route]``) and checks it with DRC.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import json
 import sys
 from pathlib import Path
 
+from .route import RouteEnvError, load_route_options, route_project
 from .update import STEPS, ProjectError, update_project
 from .update.check import StepResult, run_check
 from .update.libcache import LibraryError
@@ -80,6 +83,31 @@ def cmd_options(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_route(args: argparse.Namespace) -> int:
+    project = args.project.resolve()
+    opts = load_route_options(project, passes=args.passes)
+    res = route_project(project, opts, jar=args.jar, keep=args.keep)
+    print(
+        f"freerouting: {res.unrouted if res.unrouted is not None else '?'} unrouted"
+        + (
+            f"; {res.stitching_vias} stitching via(s)"
+            + (
+                f", {res.orphaned} pour island(s) left without one"
+                if res.orphaned
+                else ""
+            )
+            if opts.stitch
+            else ""
+        )
+    )
+    print(
+        f"DRC: {len(res.unconnected)} unconnected, {len(res.errors)} error(s) -> {res.board.name}"
+    )
+    for m in res.unconnected + res.errors:
+        print(f"  {m}")
+    return 0 if res.ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="inkibox",
@@ -91,6 +119,7 @@ def main(argv: list[str] | None = None) -> int:
         ("update", "run the three KiCad update actions headless"),
         ("check", "up to date, ERC/DRC clean, unchanged"),
         ("options", "print the effective update options"),
+        ("route", "autoroute with Freerouting, then check with DRC"),
     ):
         p = sub.add_parser(name, help=helptext)
         p.add_argument(
@@ -100,6 +129,17 @@ def main(argv: list[str] | None = None) -> int:
             default=Path.cwd(),
             help="project directory (default: .)",
         )
+        if name == "route":
+            p.add_argument(
+                "--passes", type=int, help="Freerouting passes (default 100)"
+            )
+            p.add_argument(
+                "--jar", help="a Freerouting jar to use instead of the pinned release"
+            )
+            p.add_argument(
+                "--keep", type=Path, help="keep the DSN, SES and Freerouting log here"
+            )
+            continue
         p.add_argument(
             "--set",
             action="append",
@@ -118,10 +158,13 @@ def main(argv: list[str] | None = None) -> int:
             )
     args = ap.parse_args(argv)
     try:
-        return {"update": cmd_update, "check": cmd_check, "options": cmd_options}[
-            args.cmd
-        ](args)
-    except (OptionsError, ProjectError, LibraryError) as exc:
+        return {
+            "update": cmd_update,
+            "check": cmd_check,
+            "options": cmd_options,
+            "route": cmd_route,
+        }[args.cmd](args)
+    except (OptionsError, ProjectError, LibraryError, RouteEnvError) as exc:
         print(f"inkibox: {exc}", file=sys.stderr)
         return 2
 
