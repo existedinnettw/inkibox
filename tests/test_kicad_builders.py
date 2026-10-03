@@ -64,3 +64,62 @@ def test_footprint_zones_move_with_the_footprint():
     # rotate(x, y, 90) = (y, -x), then the footprint position
     assert pts == [(10.0, 20.0), (10.0, 18.0), (11.0, 18.0), (11.0, 20.0)]
     assert fp.pad("1").angle == 90.0
+
+
+def _bbox(body: str):
+    from inkibox.kicad.board import _fp_bbox
+
+    return tuple(
+        round(v, 6) for v in _fp_bbox(parse(f'(footprint "B" (layer "F.Cu") {body})'))
+    )
+
+
+def test_circle_courtyard_counts_its_radius():
+    # MountingHole_3.2mm_M3: the courtyard is a circle of radius 3.45 around the origin
+    assert _bbox(
+        '(fp_circle (center 0 0) (end 3.45 0) (stroke (width 0.05) (type solid)) (layer "F.CrtYd"))'
+        ' (pad "" np_thru_hole circle (at 0 0) (size 3.2 3.2) (drill 3.2) (layers "*.Cu"))'
+    ) == (-3.45, -3.45, 3.45, 3.45)
+
+
+def test_arc_courtyard_counts_the_extremes_it_passes():
+    # a half circle of radius 2 around (1, 0), from the top through the right to the bottom
+    arc = '(fp_arc (start 1 -2) (mid 3 0) (end 1 2) (stroke (width 0.05) (type solid)) (layer "F.CrtYd"))'
+    assert _bbox(arc) == (1.0, -2.0, 3.0, 2.0)
+    # the same ends through the left: the other half
+    assert _bbox(arc.replace("(mid 3 0)", "(mid -1 0)")) == (-1.0, -2.0, 1.0, 2.0)
+    # a quarter arc that passes no extreme: its ends
+    q = '(fp_arc (start 2 0) (mid 1.414214 -1.414214) (end 0 -2) (stroke (width 0.05) (type solid)) (layer "F.CrtYd"))'
+    assert _bbox(q) == (0.0, -2.0, 2.0, 0.0)
+
+
+def test_polygon_arc_edges_count():
+    poly = (
+        "(fp_poly (pts (xy -1 0) (arc (start -1 0) (mid 0 -1) (end 1 0)) (xy 1 0))"
+        ' (stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd"))'
+    )
+    assert _bbox(poly) == (-1.0, -1.0, 1.0, 0.0)
+
+
+def test_pads_count_by_rotation_and_shape():
+    # no courtyard: graphics and pads; a 4 x 1 pad turned 90 degrees is 1 wide, 4 tall
+    assert _bbox('(pad "1" smd rect (at 5 0 90) (size 4 1) (layers "F.Cu"))') == (
+        4.5,
+        -2.0,
+        5.5,
+        2.0,
+    )
+    # a round pad is the same at any angle
+    assert _bbox(
+        '(pad "1" thru_hole circle (at 0 0 45) (size 2 2) (drill 1) (layers "*.Cu"))'
+    ) == (
+        -1.0,
+        -1.0,
+        1.0,
+        1.0,
+    )
+    # a custom pad reaches as far as its primitives
+    assert _bbox(
+        '(pad "1" smd custom (at 0 0 90) (size 1 1) (layers "F.Cu")'
+        " (primitives (gr_circle (center 3 0) (end 4 0) (width 0) (fill yes))))"
+    ) == (-1.0, -4.0, 1.0, 0.5)
