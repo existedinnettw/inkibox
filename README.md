@@ -110,9 +110,9 @@ by [kippm](https://github.com/existedinnettw/KIPPM):
 
 | Module | Does |
 |---|---|
-| `inkibox.kicad.Libraries` | resolves `nick:item` through the project tables and KiCad's global tables (KiCad path variables from the environment, `kicad_common.json` and the `kicad-cli` wrapper: `inkibox.kicad.tables`); loads symbols flattened (`extends` resolved) and footprints |
-| `inkibox.kicad.Schematic` | places symbols, labels pins (stub + local label), hangs power symbols, marks no-connects; tracks the KiCad net name of every pin |
-| `inkibox.kicad.Board` | outline, footprints from libraries with nets on their pads (from the schematic symbol), tracks, vias, zones; `kicad-cli pcb drc --schematic-parity` sees no mismatch |
+| `inkibox.kicad.Libraries` | resolves `nick:item` through the project tables and KiCad's global tables (KiCad path variables from the environment, `kicad_common.json` and the `kicad-cli` wrapper: `inkibox.kicad.tables`); loads symbols flattened (`extends` resolved) and footprints; a symbol's pins are those of body style 1 (not the De Morgan alternate) |
+| `inkibox.kicad.Schematic` | places symbols, labels pins (stub + local label, optionally with a PWR_FLAG for a supply net named by a label), hangs power symbols, marks no-connects; tracks the KiCad net name of every pin |
+| `inkibox.kicad.Board` | outline, footprints from libraries with nets on their pads (from the schematic symbol), tracks, vias, zones; a footprint's own zones (keepouts) move with it; every uuid is stable, so a regenerated board is byte-identical; `kicad-cli pcb drc --schematic-parity` sees no mismatch |
 | `inkibox.kicad.GridRouter` | a two-layer Manhattan grid router (Dijkstra, layer direction preference, via cost) honouring clearance, hole-to-hole and edge rules; reports what it cannot route |
 
 ```python
@@ -132,7 +132,7 @@ pcb.place(a1, (150, 80))                      # pads get the pins' nets
 pcb.write(project_dir / "carrier.kicad_pcb")
 ```
 
-See `ecat_io_b/scripts/generate.py` for a complete carrier (three modules, a buck converter, terminals, routing and the kicad-cli ERC/DRC gate).
+See `ecat_io_b/scripts/generate.py` for a complete carrier (three modules, terminals, routing and the kicad-cli ERC/DRC gate).
 
 ## todo
 

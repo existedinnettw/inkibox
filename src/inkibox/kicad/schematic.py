@@ -198,8 +198,12 @@ class Schematic:
         self.wire(pin.pos, end)
         return end
 
-    def label(self, pin: PlacedPin, name: str, *, stub: float = 2.54) -> None:
-        """Local label ``name`` on a stub from ``pin``; the pin joins net ``/name``."""
+    def label(
+        self, pin: PlacedPin, name: str, *, stub: float = 2.54, flag: bool = False
+    ) -> None:
+        """Local label ``name`` on a stub from ``pin``; the pin joins net ``/name``. With
+        ``flag`` a PWR_FLAG shares the label's point (a supply net named by a label, such as
+        the input of a regulator behind a protection diode)."""
         end = self.stub(pin, stub) if stub else pin.pos
         angle, justify = {
             (1, 0): (0, ("left", "bottom")),
@@ -209,6 +213,8 @@ class Schematic:
         }[(pin.dx, pin.dy)]
         self.labels.append((name, num(end[0]), num(end[1]), angle, justify))
         pin.net = f"/{name}"
+        if flag:
+            self._flag(end, pin.net)
 
     def power(
         self,
@@ -250,17 +256,21 @@ class Schematic:
         if pin_net is not None:
             pin_net.net = net
         if flag:
-            self._flag_count += 1
-            flag_sym = self.place(
-                "power:PWR_FLAG",
-                f"#FLG{self._flag_count:03d}",
-                (point[0], point[1]),
-                0,
-                in_bom=False,
-            )
-            for p in flag_sym.pins.values():
-                p.net = net
+            self._flag(point, net)
         return sym
+
+    def _flag(self, point: tuple[float, float], net: str) -> None:
+        """A PWR_FLAG with its pin on ``point``, on ``net``."""
+        self._flag_count += 1
+        flag_sym = self.place(
+            "power:PWR_FLAG",
+            f"#FLG{self._flag_count:03d}",
+            (point[0], point[1]),
+            0,
+            in_bom=False,
+        )
+        for p in flag_sym.pins.values():
+            p.net = net
 
     def no_connect(self, pin: PlacedPin) -> None:
         self.no_connects.append(pin.pos)
