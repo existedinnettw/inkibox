@@ -32,3 +32,11 @@
 
 [tool.pytest.ini_options]
     testpaths = ["tests"]
+
+[tool.uv]
+    # floors for transitive dependencies with published advisories (Dependabot alerts
+    # 1-5): a later `uv lock` cannot fall back below the patched releases
+    constraint-dependencies = [
+        "pyjwt>=2.15.0",  # GHSA: RecursionError DoS in unverified payload parsing (via mcp)
+        "virtualenv>=21.7.13",  # GHSA: activation script / pyvenv.cfg injection (via pre-commit)
+    ]
