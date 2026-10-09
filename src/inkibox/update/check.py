@@ -142,7 +142,22 @@ def step_links(project_dir: Path) -> list[str]:
     return problems
 
 
-def _report(kind: str, project_dir: Path) -> list[str]:
+def allow_unconnected(project_dir: Path) -> bool:
+    """``[tool.inkibox.check] allow_unconnected = true``: a board still waiting for its
+    routing (placed, not routed) passes DRC with unconnected items; every other DRC
+    finding still fails."""
+    import tomllib
+
+    pp = project_dir / "pyproject.toml"
+    if not pp.is_file():
+        return False
+    cfg = (
+        tomllib.loads(pp.read_text(encoding="utf-8")).get("tool", {}).get("inkibox", {})
+    )
+    return bool(cfg.get("check", {}).get("allow_unconnected", False))
+
+
+def _report(kind: str, project_dir: Path, *, unconnected: bool = True) -> list[str]:
     root, _, board = project_files(project_dir)
     if kind == "drc" and board is None:
         return []
@@ -167,7 +182,10 @@ def _report(kind: str, project_dir: Path) -> list[str]:
     items = []
     for sheet in report.get("sheets", []):
         items += sheet.get("violations", [])
-    for key in ("violations", "unconnected_items", "schematic_parity"):
+    keys = ["violations", "schematic_parity"] + (
+        ["unconnected_items"] if unconnected else []
+    )
+    for key in keys:
         items += report.get(key, [])
     return [
         f"[{v['type']}] {v['description']}"
@@ -221,7 +239,15 @@ def run_check(
         ),
         ("footprint links", lambda: step_links(project_dir)),
         ("ERC", lambda: _report("erc", project_dir)),
-        ("DRC + schematic parity", lambda: _report("drc", project_dir)),
+        (
+            "DRC + schematic parity"
+            + (
+                " (unconnected items allowed)" if allow_unconnected(project_dir) else ""
+            ),
+            lambda: _report(
+                "drc", project_dir, unconnected=not allow_unconnected(project_dir)
+            ),
+        ),
         ("kippm doctor", (lambda: step_doctor(project_dir)) if kippm else None),
     ]
     results = []

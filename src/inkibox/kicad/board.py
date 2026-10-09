@@ -227,9 +227,19 @@ class Board:
         paper: str = "A4",
         title: str = "",
         sheet_file: str | None = None,
+        copper_layers: int = 2,
+        stackup: Node | None = None,
     ) -> None:
+        """``copper_layers`` is an even number (2, 4, 6, …); ``stackup`` an optional
+        ``(stackup …)`` node for the board setup (see :func:`stackup`)."""
+        if copper_layers < 2 or copper_layers % 2:
+            raise ValueError(
+                f"copper_layers must be even and >= 2, not {copper_layers}"
+            )
         self.project = project
         self.libs = libs
+        self.copper_layers = copper_layers
+        self.stackup = stackup
         self.thickness = thickness
         self.paper = paper
         self.title = title
@@ -301,10 +311,13 @@ class Board:
             value = value if value is not None else symbol.value
         if not ref or not lib_id:
             raise ValueError("place() needs a symbol or ref + lib_id")
-        if layer != "F.Cu":
-            raise NotImplementedError("only front-side placement is supported")
+        if layer not in ("F.Cu", "B.Cu"):
+            raise ValueError(f"a footprint goes on F.Cu or B.Cu, not {layer}")
+        back = layer == "B.Cu"
         lib = clone(self.library_footprint(lib_id))
         fx, fy = at
+        if back:
+            lib = self._flipped(lib, rot, (fx, fy))
         node: Node = [S("footprint"), lib_id]
         for item in lib[2:]:
             if isinstance(item, list) and head(item) in (
@@ -345,7 +358,8 @@ class Board:
                 prop[2] = values[key]
             if key == "Reference" and hide_reference and child(prop, "hide") is None:
                 replace_child(prop, "hide", [S("hide"), S("yes")])
-            _rotate_text(prop, rot)
+            if not back:  # a flipped footprint's texts are already turned
+                _rotate_text(prop, rot)
             replace_child(
                 prop, "uuid", [S("uuid"), stable_uuid(self.project, ref, "prop", key)]
             )
@@ -357,7 +371,7 @@ class Board:
                         key,
                         values[key],
                         [S("at"), 0, 0, num(rot)],
-                        [S("layer"), "F.Fab"],
+                        [S("layer"), "B.Fab" if back else "F.Fab"],
                         [S("hide"), S("yes")],
                         [S("uuid"), stable_uuid(self.project, ref, "prop", key)],
                         [
@@ -370,8 +384,9 @@ class Board:
                         ],
                     ]
                 )
-        for txt in children(node, "fp_text"):
-            _rotate_text(txt, rot)
+        if not back:
+            for txt in children(node, "fp_text"):
+                _rotate_text(txt, rot)
         if in_bom is not None:
             attr = child(node, "attr")
             flags = [
@@ -383,9 +398,17 @@ class Board:
                 flags.append(S("exclude_from_bom"))
             replace_child(node, "attr", [S("attr"), *flags] if flags else None)
         if symbol is not None:
-            node.append([S("path"), f"/{symbol.uuid}"])
-            node.append([S("sheetname"), "/"])
-            node.append([S("sheetfile"), self.sheet_file])
+            sheet = symbol.sheet
+            if sheet is not None and sheet.parent is not None:
+                # a sub-sheet: the path runs through the sheet symbols, not the root
+                path = sheet.path.split("/", 2)[2] if sheet.path.count("/") > 1 else ""
+                node.append([S("path"), f"/{path}/{symbol.uuid}"])
+                node.append([S("sheetname"), sheet.sheet_names])
+                node.append([S("sheetfile"), sheet.file])
+            else:
+                node.append([S("path"), f"/{symbol.uuid}"])
+                node.append([S("sheetname"), "/"])
+                node.append([S("sheetfile"), self.sheet_file])
         fp = PlacedFootprint(ref, lib_id, fx, fy, rot, layer, node)
         for pad in children(node, "pad"):
             a = atoms_of(pad)
@@ -396,7 +419,9 @@ class Board:
             pa = atoms_of(at_node) if at_node is not None else [0, 0]
             px, py = float(pa[0]), float(pa[1])
             pang = float(pa[2]) if len(pa) > 2 else 0.0
-            if rot:
+            if back:  # angles already absolute in a flipped footprint
+                pang -= rot
+            elif rot:
                 replace_child(
                     pad, "at", [S("at"), num(px), num(py), num((pang + rot) % 360)]
                 )
@@ -409,7 +434,7 @@ class Board:
             )
             cu = frozenset(
                 lay
-                for lay in ("F.Cu", "B.Cu")
+                for lay in ("F.Cu", "B.Cu", *self.inner_layers)
                 if any(v in ("*.Cu", lay) for v in lay_atoms)
             )
             net: str | None = None
@@ -459,7 +484,8 @@ class Board:
                 key = ("fp_text", str(index))
             elif kind == "zone":
                 key = ("zone", str(index))
-                _place_zone(item, fx, fy, rot)
+                if not back:  # placed with the flip
+                    _place_zone(item, fx, fy, rot)
             else:
                 continue
             replace_child(
@@ -467,6 +493,27 @@ class Board:
             )
         self.footprints.append(fp)
         return fp
+
+    @property
+    def inner_layers(self) -> list[str]:
+        return [f"In{i}.Cu" for i in range(1, self.copper_layers - 1)]
+
+    def _flipped(self, lib: Node, rot: float, at: tuple[float, float]) -> Node:
+        """A library footprint as a board stores it on the back: mirrored top to bottom,
+        layers swapped, texts mirrored, angles absolute (``inkibox update``'s own flip,
+        which matches KiCad's)."""
+        from ..update.footprints import place as place_items
+        from .sexpr import _to_sfile, parse_one
+        from .sfile import Node as SNode
+        from .sfile import format_node
+
+        sf = _to_sfile(lib)
+        assert isinstance(sf, SNode)
+        items = place_items(
+            sf, side="B.Cu", rotation=rot, copper=self.copper_layers, origin=at
+        )
+        out = SNode("footprint", [sf.items[0], *items])
+        return parse_one(format_node(out))
 
     # ------------------------------------------------------------------ copper
 
@@ -480,9 +527,15 @@ class Board:
                 )
 
     def via(
-        self, at: tuple[float, float], net: str, size: float = 0.8, drill: float = 0.4
+        self,
+        at: tuple[float, float],
+        net: str,
+        size: float = 0.8,
+        drill: float = 0.4,
+        layers: tuple[str, str] = ("F.Cu", "B.Cu"),
     ) -> None:
-        self.vias.append((num(at[0]), num(at[1]), size, drill, net))
+        """A via; ``layers`` other than F.Cu–B.Cu make it blind or buried."""
+        self.vias.append((num(at[0]), num(at[1]), size, drill, net, layers))
 
     def zone(
         self,
@@ -622,18 +675,21 @@ class Board:
         if self.title:
             root.append([S("title_block"), [S("title"), self.title]])
         layers: Node = [S("layers")]
-        for idx, name, kind, user in LAYERS:
-            row: Node = [S("layers"), idx, name, S(kind)]
-            row = [idx, name, S(kind)] + ([user] if user else [])
-            layers.append(row)
+        inner = [
+            (4 + 2 * i, name, "signal", None)
+            for i, name in enumerate(self.inner_layers)
+        ]
+        for idx, name, kind, user in LAYERS[:1] + inner + LAYERS[1:]:
+            layers.append([idx, name, S(kind)] + ([user] if user else []))
         root.append(layers)
-        root.append(
-            [
-                S("setup"),
-                [S("pad_to_mask_clearance"), 0],
-                [S("allow_soldermask_bridges_in_footprints"), S("no")],
-            ]
-        )
+        setup: Node = [S("setup")]
+        if self.stackup is not None:
+            setup.append(self.stackup)
+        setup += [
+            [S("pad_to_mask_clearance"), 0],
+            [S("allow_soldermask_bridges_in_footprints"), S("no")],
+        ]
+        root.append(setup)
         root.extend(self.outline)
         root.extend(self.texts)
         for fp in self.footprints:
@@ -655,14 +711,16 @@ class Board:
                     ],
                 ]
             )
-        for i, (x, y, size, drill, net) in enumerate(self.vias):
+        for i, (x, y, size, drill, net, vlayers) in enumerate(self.vias):
+            through = tuple(vlayers) == ("F.Cu", "B.Cu")
             root.append(
                 [
                     S("via"),
+                    *([] if through else [S("blind")]),
                     [S("at"), num(x), num(y)],
                     [S("size"), num(size)],
                     [S("drill"), num(drill)],
-                    [S("layers"), "F.Cu", "B.Cu"],
+                    [S("layers"), *vlayers],
                     [S("net"), net],
                     [S("uuid"), stable_uuid(self.project, "via", str(i), f"{x},{y}")],
                 ]
@@ -673,6 +731,33 @@ class Board:
 
     def write(self, path: Path) -> None:
         write_pretty(path, self.to_node())
+
+
+def stackup(
+    layers: list[tuple[str, str, float, dict[str, object]]],
+    *,
+    copper_finish: str = "ENIG",
+    impedance_controlled: bool = True,
+) -> Node:
+    """A ``(stackup …)`` node from ``(name, type, thickness_mm, extra)`` rows, top to
+    bottom, as KiCad's Board Setup writes it: copper (``"copper"``), dielectrics
+    (``"core"``/``"prepreg"``, extra ``material``, ``epsilon_r``, ``loss_tangent``), mask
+    (``"Top Solder Mask"`` …), silk and paste (thickness 0: none written)."""
+    node: Node = [S("stackup")]
+    for name, kind, thickness, extra in layers:
+        row: Node = [S("layer"), name, [S("type"), kind]]
+        if thickness:
+            row.append([S("thickness"), num(thickness)])
+        for key in ("material", "epsilon_r", "loss_tangent", "color"):
+            if key in extra:
+                val = extra[key]
+                row.append([S(key), val if isinstance(val, str) else num(float(val))])  # type: ignore[arg-type]
+        node.append(row)
+    node.append([S("copper_finish"), copper_finish])
+    node.append(
+        [S("dielectric_constraints"), S("yes" if impedance_controlled else "no")]
+    )
+    return node
 
 
 def rotate(x: float, y: float, angle_deg: float) -> tuple[float, float]:

@@ -97,7 +97,14 @@ clearance_overrides = true
 models_3d = true
 ```
 
-`--set footprints.models_3d=false` overrides one on the command line. The options that only
+`--set footprints.models_3d=false` overrides one on the command line.
+
+A board that is placed but not yet routed can still gate everything else in CI:
+
+```toml
+[tool.inkibox.check]
+allow_unconnected = true   # DRC passes with unconnected items; every other finding fails
+``` The options that only
 move or restyle text (field visibilities/effects/positions, pin text visibility, footprint
 text layers/effects/positions) and re-linking by reference are not implemented headless:
 setting one is an error, so a design never depends on them silently.
@@ -147,8 +154,8 @@ by [kippm](https://github.com/existedinnettw/KIPPM):
 | Module | Does |
 |---|---|
 | `inkibox.kicad.Libraries` | resolves `nick:item` through the project tables and KiCad's global tables (KiCad path variables from the environment, `kicad_common.json` and the `kicad-cli` wrapper: `inkibox.kicad.tables`); loads symbols flattened (`extends` resolved) and footprints; a symbol's pins are those of body style 1 (not the De Morgan alternate) |
-| `inkibox.kicad.Schematic` | places symbols, labels pins (stub + local label, optionally with a PWR_FLAG for a supply net named by a label), hangs power symbols, marks no-connects; tracks the KiCad net name of every pin |
-| `inkibox.kicad.Board` | outline, footprints from libraries with nets on their pads (from the schematic symbol), tracks, vias, zones, keepouts (rule areas); a footprint's own zones (keepouts) move with it; every uuid is stable, so a regenerated board is byte-identical; `kicad-cli pcb drc --schematic-parity` sees no mismatch |
+| `inkibox.kicad.Schematic` | places symbols (one unit at a time for multi-unit symbols: `place(…, unit=n)`), labels pins (stub + local or global label, optionally with a PWR_FLAG for a supply net named by a label), hangs power symbols, marks no-connects; sub-sheets (`sheet(name, file, at)`, no sheet pins: nets cross sheets by global labels and power symbols); tracks the KiCad net name of every pin; `components()` joins the units of each reference for the board |
+| `inkibox.kicad.Board` | outline, any even number of copper layers with an optional stackup (`Board(…, copper_layers=8, stackup=stackup([...]))`), footprints from libraries with nets on their pads (from the schematic symbol), on either side (`layer="B.Cu"` flips them as KiCad does), linked to their sheet, tracks, through/blind vias, zones, keepouts (rule areas); a footprint's own zones (keepouts) move with it; every uuid is stable, so a regenerated board is byte-identical; `kicad-cli pcb drc --schematic-parity` sees no mismatch |
 | `inkibox.kicad.GridRouter` | a small two-layer grid router, kept for existing scripts; new boards route with `inkibox route` |
 
 ```python

@@ -123,3 +123,76 @@ def test_pads_count_by_rotation_and_shape():
         '(pad "1" smd custom (at 0 0 90) (size 1 1) (layers "F.Cu")'
         " (primitives (gr_circle (center 3 0) (end 4 0) (width 0) (fill yes))))"
     ) == (-1.0, -4.0, 1.0, 0.5)
+
+
+# --------------------------------------------------------------------------- sheets, units, back side
+
+TWO_UNITS = """(symbol "A"
+\t(property "Reference" "U" (at 0 0 0))
+\t(property "Value" "A" (at 0 0 0))
+\t(symbol "A_0_1" (pin power_in line (at 0 -5.08 90) (length 2.54) (name "V+") (number "8")))
+\t(symbol "A_1_1" (pin output line (at 5.08 0 180) (length 2.54) (name "OA") (number "1")))
+\t(symbol "A_2_1" (pin output line (at 5.08 0 180) (length 2.54) (name "OB") (number "7"))))"""
+
+
+class _SymLibs:
+    def symbol(self, lib_id):
+        return parse(TWO_UNITS)
+
+
+def test_units_have_their_own_pins_and_join_for_the_board():
+    from inkibox.kicad import Schematic
+
+    sch = Schematic("p", _SymLibs())  # type: ignore[arg-type]
+    sub = sch.sheet("Sub", "sub.kicad_sch", (10, 10))
+    a = sub.place("L:A", "U1", (0, 0), unit=1)
+    b = sch.place("L:A", "U1", (20, 0), unit=2)
+    assert sorted(a.pins) == ["1", "8"] and sorted(b.pins) == ["7", "8"]
+    sub.label(a.pin("1"), "X")
+    sub.global_label(a.pin("8"), "VCC")
+    assert a.pin("1").net == "/Sub/X" and a.pin("8").net == "VCC"
+    (u1,) = sch.components()
+    assert sorted(u1.pins) == ["1", "7", "8"]
+    # KiCad's netlist names the unit on the first sheet in page order: the root's
+    assert u1.uuid == b.uuid and u1.sheet is sch
+    # an instance lists every pin of the symbol, whichever unit it is
+    node = sub._symbol_node(a)
+    assert [atom_text(p[1]) for p in children(node, "pin")] == ["8", "1", "7"]
+
+
+def test_sub_sheet_footprints_link_through_the_sheet_symbol():
+    from inkibox.kicad import Schematic
+
+    sch = Schematic("p", _SymLibs())  # type: ignore[arg-type]
+    sub = sch.sheet("Sub", "sub.kicad_sch", (10, 10))
+    sub.place("L:A", "U1", (0, 0))
+    (u1,) = sch.components()
+    pcb = Board("p", _Libs())  # type: ignore[arg-type]
+    fp = pcb.place(u1, (0, 0), lib_id="L:T")
+    assert atom_text(child(fp.node, "path")[1]) == f"/{sub.sheet_uuid}/{u1.uuid}"
+    assert atom_text(child(fp.node, "sheetname")[1]) == "/Sub/"
+    assert atom_text(child(fp.node, "sheetfile")[1]) == "sub.kicad_sch"
+
+
+def test_back_side_footprints_are_mirrored_top_to_bottom():
+    pcb = Board("p", _Libs(), copper_layers=4)  # type: ignore[arg-type]
+    fp = pcb.place(None, (10.0, 20.0), 90.0, ref="R1", lib_id="L:T", layer="B.Cu")
+    assert atom_text(child(fp.node, "layer")[1]) == "B.Cu"
+    pad = fp.pad("1")
+    assert pad.layers == frozenset({"B.Cu"})
+    # library (-1, 0), mirrored (-1, 0), turned 90 degrees: (0, 1) from the origin
+    assert (pad.x, pad.y) == (10.0, 21.0)
+    line = next(i for i in fp.node if head(i) == "fp_line")
+    assert atom_text(child(line, "layer")[1]) == "B.SilkS"
+    assert [float(v) for v in child(line, "start")[1:3]] == [-1.0, 1.0]
+
+
+def test_inner_layers_and_stackup_are_written():
+    from inkibox.kicad.board import stackup
+
+    st = stackup([("F.Cu", "copper", 0.035, {}), ("B.Cu", "copper", 0.035, {})])
+    pcb = Board("p", _Libs(), copper_layers=6, stackup=st)  # type: ignore[arg-type]
+    root = pcb.to_node()
+    names = [row[1] for row in child(root, "layers")[1:]][:6]
+    assert names == ["F.Cu", "In1.Cu", "In2.Cu", "In3.Cu", "In4.Cu", "B.Cu"]
+    assert child(child(root, "setup"), "stackup") is not None
