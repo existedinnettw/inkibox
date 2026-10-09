@@ -234,9 +234,19 @@ class Schematic:
                 out.append(units[0])
                 continue
             first = units[0]
+            # pins of unit 0 (common to all units) appear in every placed unit: keep the
+            # copy that is connected, and refuse two copies on different nets
             pins: dict[str, PlacedPin] = {}
             for u in units:
-                pins.update(u.pins)
+                for number, pin in u.pins.items():
+                    have = pins.get(number)
+                    if have is None or have.net is None:
+                        pins[number] = pin
+                    elif pin.net is not None and pin.net != have.net:
+                        raise ValueError(
+                            f"{first.ref} pin {number}: {have.net} on unit {have.symbol.unit}, "
+                            f"{pin.net} on unit {u.unit}"
+                        )
             out.append(
                 PlacedSymbol(
                     ref=first.ref,

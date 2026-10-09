@@ -230,11 +230,11 @@ class Board:
         copper_layers: int = 2,
         stackup: Node | None = None,
     ) -> None:
-        """``copper_layers`` is an even number (2, 4, 6, …); ``stackup`` an optional
+        """``copper_layers`` is an even number (2, 4, … 32); ``stackup`` an optional
         ``(stackup …)`` node for the board setup (see :func:`stackup`)."""
-        if copper_layers < 2 or copper_layers % 2:
+        if copper_layers < 2 or copper_layers > 32 or copper_layers % 2:
             raise ValueError(
-                f"copper_layers must be even and >= 2, not {copper_layers}"
+                f"copper_layers must be even, 2 to 32 (KiCad's limit), not {copper_layers}"
             )
         self.project = project
         self.libs = libs

@@ -196,3 +196,35 @@ def test_inner_layers_and_stackup_are_written():
     names = [row[1] for row in child(root, "layers")[1:]][:6]
     assert names == ["F.Cu", "In1.Cu", "In2.Cu", "In3.Cu", "In4.Cu", "B.Cu"]
     assert child(child(root, "setup"), "stackup") is not None
+
+
+def test_common_pins_keep_the_connected_copy_when_units_join():
+    from inkibox.kicad import Schematic
+
+    sch = Schematic("p", _SymLibs())  # type: ignore[arg-type]
+    a = sch.place("L:A", "U1", (0, 0), unit=1)
+    sch.place("L:A", "U1", (20, 0), unit=2)  # its copy of the common pin 8 stays open
+    sch.global_label(a.pin("8"), "VCC")
+    (u1,) = sch.components()
+    assert u1.pins["8"].net == "VCC"
+
+
+def test_common_pins_on_two_nets_are_an_error():
+    import pytest
+
+    from inkibox.kicad import Schematic
+
+    sch = Schematic("p", _SymLibs())  # type: ignore[arg-type]
+    a = sch.place("L:A", "U1", (0, 0), unit=1)
+    b = sch.place("L:A", "U1", (20, 0), unit=2)
+    sch.global_label(a.pin("8"), "VCC")
+    sch.global_label(b.pin("8"), "VDD")
+    with pytest.raises(ValueError, match="pin 8"):
+        sch.components()
+
+
+def test_more_than_32_copper_layers_is_refused():
+    import pytest
+
+    with pytest.raises(ValueError, match="32"):
+        Board("p", _Libs(), copper_layers=34)  # type: ignore[arg-type]
