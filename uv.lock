@@ -11,10 +11,7 @@ resolution-markers = [
 ]
 
 [manifest]
-constraints = [
-    { name = "pyjwt", specifier = ">=2.15.0" },
-    { name = "virtualenv", specifier = ">=21.14.4" },
-]
+constraints = [{ name = "virtualenv", specifier = ">=21.14.4" }]
 
 [[package]]
 name = "aiofile"
@@ -573,6 +570,7 @@ dependencies = [
     { name = "kicad-python" },
     { name = "kicad-sch-api" },
     { name = "kikit" },
+    { name = "pyjwt" },
     { name = "sexpdata" },
 ]
 
@@ -591,6 +589,7 @@ requires-dist = [
     { name = "kicad-python", specifier = ">=0.5.0" },
     { name = "kicad-sch-api", specifier = ">=0.5.6" },
     { name = "kikit", specifier = ">=1.7.2" },
+    { name = "pyjwt", specifier = ">=2.15.0" },
     { name = "sexpdata", specifier = ">=1.0.2" },
 ]
 
