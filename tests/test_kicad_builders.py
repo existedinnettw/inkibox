@@ -278,3 +278,71 @@ def test_unnamed_pin_unconnected_net_has_no_unit_suffix():
     sch.no_connect(b.pin("7"))
     # Then KiCad's form for an unnamed pin: the bare reference and the pad
     assert b.pin("7").net == "unconnected-(U1-Pad7)"
+
+
+def test_label_names_are_escaped_in_nets_as_kicad_does():
+    from inkibox.kicad import Schematic
+
+    # Given labels with a slash and characters KiCad leaves alone
+    sch = Schematic("p", _SymLibs())  # type: ignore[arg-type]
+    sub = sch.sheet("Sub", "sub.kicad_sch", (10, 10))
+    a = sub.place("L:A", "U1", (0, 0), unit=1)
+    sub.label(a.pin("1"), "A/B")
+    sub.global_label(a.pin("8"), 'USB/D+ {x} N\\M "q"')
+    # Then "/" is {slash} (it separates sheets); the sheet path keeps its slashes and
+    # nothing else is escaped (kicad-cli's netlist, tests/test_e2e_hierarchy.py)
+    assert a.pin("1").net == "/Sub/A{slash}B"
+    assert a.pin("8").net == 'USB{slash}D+ {x} N\\M "q"'
+
+
+def test_blind_vias_name_their_layers():
+    pcb = Board("p", _Libs(), copper_layers=4)  # type: ignore[arg-type]
+    pcb.via((1.0, 2.0), "GND", size=0.25, drill=0.1, layers=("F.Cu", "In1.Cu"))
+    pcb.via((3.0, 4.0), "GND")
+    vias = children(pcb.to_node(), "via")
+    assert [atom_text(v[1]) for v in vias][:1] == ["blind"]
+    assert [atom_text(x) for x in child(vias[0], "layers")[1:]] == ["F.Cu", "In1.Cu"]
+    assert head(vias[1][1]) == "at"  # a through via carries no type
+    assert [atom_text(x) for x in child(vias[1], "layers")[1:]] == ["F.Cu", "B.Cu"]
+
+
+def test_back_side_footprint_zone_is_flipped_and_placed():
+    # Given the test footprint, whose keepout zone spans (0,0)-(2,1) on F.Cu
+    pcb = Board("p", _Libs(), copper_layers=4)  # type: ignore[arg-type]
+    fp = pcb.place(None, (10.0, 20.0), 0, ref="U1", lib_id="L:T", layer="B.Cu")
+    (zone,) = children(fp.node, "zone")
+    pts = sorted(
+        (float(xy[1]), float(xy[2]))
+        for xy in children(child(child(zone, "polygon"), "pts"), "xy")
+    )
+    # Then it is mirrored top to bottom (y negated), moved to the footprint and on B.Cu
+    assert pts == [(10.0, 19.0), (10.0, 20.0), (12.0, 19.0), (12.0, 20.0)]
+    assert atom_text(child(zone, "layer")[1]) == "B.Cu"
+
+
+def test_stackup_rows_as_kicad_writes_them():
+    from inkibox.kicad.board import stackup
+
+    st = stackup(
+        [
+            ("F.SilkS", "Top Silk Screen", 0, {}),
+            ("F.Cu", "copper", 0.035, {}),
+            ("dielectric 1", "prepreg", 0.09, {"material": "FR4", "epsilon_r": 4.4}),
+            ("B.Cu", "copper", 0.035, {}),
+        ],
+        copper_finish="ENIG",
+    )
+    rows = {atom_text(r[1]): r for r in children(st, "layer")}
+    assert child(rows["F.SilkS"], "thickness") is None  # 0: not written
+    assert child(rows["dielectric 1"], "material")[1] == "FR4"
+    assert child(rows["dielectric 1"], "epsilon_r")[1] == 4.4
+    assert atom_text(child(st, "copper_finish")[1]) == "ENIG"
+    assert atom_text(child(st, "dielectric_constraints")[1]) == "yes"
+
+
+def test_copper_layer_count_must_be_even_and_at_least_two():
+    import pytest
+
+    for bad in (0, 1, 3, 33):
+        with pytest.raises(ValueError):
+            Board("p", _Libs(), copper_layers=bad)  # type: ignore[arg-type]

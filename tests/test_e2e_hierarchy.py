@@ -69,6 +69,20 @@ def make_project(root: Path) -> tuple[Schematic, Board]:
     r2 = sub.place("Device:R", "R2", (20 * g, 20 * g), value="10k", footprint=R0603)
     sub.label(r2.pin("1"), "IN")
     sub.power(r2.pin("2"), "power:+5V")
+    # a slash in a label name: KiCad's net is <name> with "/" as {slash} (it separates
+    # sheets), the local one under its sheet path
+    r3 = sch.place("Device:R", "R3", (30 * g, 20 * g), value="1k", footprint=R0603)
+    sch.global_label(r3.pin("1"), "USB/D+")
+    sch.label(r3.pin("2"), "A/B")
+    r4 = sub.place("Device:R", "R4", (30 * g, 20 * g), value="1k", footprint=R0603)
+    sub.global_label(r4.pin("1"), "USB/D+")
+    sub.label(r4.pin("2"), "A/B")
+    r5 = sch.place("Device:R", "R5", (40 * g, 20 * g), value="1k", footprint=R0603)
+    sch.label(r5.pin("1"), "A/B")
+    sch.power(r5.pin("2"), "power:GND", rot=180)
+    r6 = sub.place("Device:R", "R6", (40 * g, 20 * g), value="1k", footprint=R0603)
+    sub.label(r6.pin("1"), "A/B")
+    sub.power(r6.pin("2"), "power:GND", rot=180)
     sch.power_at((10 * g, 10 * g), "power:+5V", flag=True)
     sch.power_at((14 * g, 10 * g), "power:GND", rot=180, flag=True)
     assert not sch.unconnected()
@@ -96,6 +110,8 @@ def make_project(root: Path) -> tuple[Schematic, Board]:
     pcb.place(comps["U1"], (110, 110))
     pcb.place(comps["R1"], (122, 105), 90, layer="B.Cu")
     pcb.place(comps["R2"], (122, 115), 30, layer="B.Cu")
+    for i, ref in enumerate(("R3", "R4", "R5", "R6")):
+        pcb.place(comps[ref], (104 + 4 * i, 104), 0)
     pcb.write(root / "t.kicad_pcb")
     return sch, pcb
 
@@ -152,8 +168,47 @@ def test_kicad_accepts_sheets_units_back_side_and_layers(tmp_path: Path):
         for p in fp.all_pads
         if p.number
     }
-    assert ours == {k: v for k, v in kicad_nets.items() if k[0] in {"U1", "R1", "R2"}}
+    assert ours == {k: v for k, v in kicad_nets.items() if k[0] in {p[0] for p in ours}}
+    assert ours[("R3", "1")] == ours[("R4", "1")] == "USB{slash}D+"
+    assert ours[("R3", "2")] == "/A{slash}B" and ours[("R4", "2")] == "/Amp/A{slash}B"
 
     # the stackup survives KiCad: 4 copper layers, dielectrics read back
     board = (root / "t.kicad_pcb").read_text()
     assert '(layer "dielectric 3"' in board and "In2.Cu" in board
+
+
+def test_pcbnew_keeps_the_stackup(tmp_path: Path):
+    """pcbnew (KiCad's own reader and writer) loads the generated board and writes back
+    every stackup row: copper, the dielectrics with their material and permittivity."""
+    import os
+
+    from inkibox.route.env import find_kicad_python
+
+    try:
+        py = find_kicad_python()
+    except RuntimeError:
+        pytest.skip("no Python with KiCad's pcbnew here")
+    root = tmp_path / "t"
+    make_project(root)
+    out = tmp_path / "saved.kicad_pcb"
+    script = (
+        "import pcbnew, sys\n"
+        "b = pcbnew.LoadBoard(sys.argv[1])\n"
+        "pcbnew.SaveBoard(sys.argv[2], b)\n"
+    )
+    env = {**os.environ, **py.env()}
+    subprocess.run(
+        [py.executable, "-c", script, str(root / "t.kicad_pcb"), str(out)],
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    saved = parse_one(out.read_text())
+    rows = {
+        atom_text(r[1]): r
+        for r in children(child(child(saved, "setup"), "stackup"), "layer")
+    }
+    assert {"F.Cu", "In1.Cu", "In2.Cu", "B.Cu"} <= set(rows)
+    for name in ("dielectric 1", "dielectric 2", "dielectric 3"):
+        assert atom_text(child(rows[name], "material")[1]) == "FR4", name
+        assert float(atom_text(child(rows[name], "epsilon_r")[1])) == 4.5, name

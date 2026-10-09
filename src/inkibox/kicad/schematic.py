@@ -67,7 +67,9 @@ def _unit_suffix(sym: PlacedSymbol) -> str:
 
 
 def _escape_net(text: str) -> str:
-    """KiCad's net-name escaping (EscapeString, CTX_NETNAME)."""
+    """KiCad's net-name escaping (EscapeString, CTX_NETNAME): "/" separates sheets in a
+    net name, so one in a label or pin name becomes ``{slash}``; braces, backslashes,
+    quotes, spaces and the rest stay as they are (kicad-cli's netlist, KiCad 10)."""
     return text.replace("/", "{slash}")
 
 
@@ -383,7 +385,7 @@ class Schematic:
             (0, 1): (270, ("left", "bottom")),
         }[(pin.dx, pin.dy)]
         self.labels.append((name, num(end[0]), num(end[1]), angle, justify))
-        pin.net = f"{self.sheet_names}{name}"
+        pin.net = f"{self.sheet_names}{_escape_net(name)}"
         if flag:
             self._flag(end, pin.net)
 
@@ -409,7 +411,7 @@ class Schematic:
         self.global_labels.append(
             (name, num(end[0]), num(end[1]), angle, justify, shape)
         )
-        pin.net = name
+        pin.net = _escape_net(name)
         if flag:
             self._flag(end, pin.net)
 
