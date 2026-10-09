@@ -13,7 +13,7 @@ resolution-markers = [
 [manifest]
 constraints = [
     { name = "pyjwt", specifier = ">=2.15.0" },
-    { name = "virtualenv", specifier = ">=21.7.13" },
+    { name = "virtualenv", specifier = ">=21.14.4" },
 ]
 
 [[package]]

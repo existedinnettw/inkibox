@@ -38,5 +38,9 @@
     # 1-5): a later `uv lock` cannot fall back below the patched releases
     constraint-dependencies = [
         "pyjwt>=2.15.0",  # GHSA: RecursionError DoS in unverified payload parsing (via mcp)
-        "virtualenv>=21.7.13",  # GHSA: activation script / pyvenv.cfg injection (via pre-commit)
+        # via pre-commit: activation-script / pyvenv.cfg injection, unchecked seed wheels
+        # (GHSA-9h9j-4vrj-gf7g, -94p9-xgh2-xp45, -x78j-v8h9-3j2q, -p58f-9548-mpm2: 21.7.13),
+        # GHSA-8rjx-v5ww-45pp / -c947-3pg5-gm8q (21.14.2), GHSA-5vjq-rrrf-7h2q (zsh
+        # PROMPT_SUBST, 21.14.4; pypa/virtualenv repository advisories)
+        "virtualenv>=21.14.4",
     ]
