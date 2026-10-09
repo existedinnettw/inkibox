@@ -16,123 +16,36 @@ on any sheet; :meth:`Schematic.components` joins the units for the board.
 
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import sch_nodes as nodes
 from .libs import Libraries, pin_defs, pin_geometry, unit_pin_defs
-from .sexpr import (
-    Node,
-    S,
-    atom_text,
-    child,
-    children,
-    clone,
-    head,
-    num,
-    stable_uuid,
-    write_pretty,
+from .nets import connected as _connected  # noqa: F401 - former home of these names
+from .nets import escape_net as _escape_net
+from .nets import unconnected_net
+from .nets import unit_suffix as _unit_suffix  # noqa: F401
+from .placed import (
+    PlacedPin,
+    PlacedSymbol,
+    join_units,
+    lib_to_sheet,
+    pin_direction,
 )
+from .sch_nodes import FONT, SCH_FORMAT
+from .sch_nodes import effects as _effects  # noqa: F401
+from .sexpr import Node, S, atom_text, children, num, stable_uuid, write_pretty
 
-SCH_FORMAT = 20260306
-FONT = 1.27
-
-
-def _effects(size: float = FONT, *justify: str, hide: bool = False) -> Node:
-    node: Node = [S("effects"), [S("font"), [S("size"), num(size), num(size)]]]
-    if justify:
-        node.append([S("justify"), *[S(j) for j in justify]])
-    if hide:
-        node.append([S("hide"), S("yes")])
-    return node
-
-
-def _unit_suffix(sym: PlacedSymbol) -> str:
-    """What KiCad appends to the reference of a multi-unit symbol in net names: the
-    unit's name if the library gives one (``unit_name``), else its letter (A, B, …)."""
-    units = {
-        atom_text(u[1]).rsplit("_", 2)[-2]
-        for u in children(sym.lib, "symbol")
-        if atom_text(u[1]).rsplit("_", 2)[-2].isdigit()
-    } - {"0"}
-    if len(units) <= 1:
-        return ""
-    for u in children(sym.lib, "symbol"):
-        parts = atom_text(u[1]).rsplit("_", 2)
-        if parts[-2] == str(sym.unit):
-            name = child(u, "unit_name")
-            if name is not None:
-                return atom_text(name[1])
-    return chr(ord("A") + sym.unit - 1)
-
-
-def _escape_net(text: str) -> str:
-    """KiCad's net-name escaping (EscapeString, CTX_NETNAME): "/" separates sheets in a
-    net name, so one in a label or pin name becomes ``{slash}``; braces, backslashes,
-    quotes, spaces and the rest stay as they are (kicad-cli's netlist, KiCad 10)."""
-    return text.replace("/", "{slash}")
-
-
-def _connected(pin: PlacedPin) -> bool:
-    """On a real net: not open, not marked no-connect."""
-    return pin.net is not None and not pin.net.startswith("unconnected-(")
-
-
-def unconnected_net(pin: PlacedPin) -> str:
-    """KiCad's name for the net of an unconnected pin: ``unconnected-(<ref>-<pin>-Pad<n>)``,
-    the reference with the unit suffix of a multi-unit symbol; a pin without a name
-    gives ``unconnected-(<ref>-Pad<n>)``, the reference without it (as kicad-cli's
-    netlist names them, checked in tests/test_e2e_hierarchy.py)."""
-    sym = pin.symbol
-    if not pin.name or pin.name == "~":
-        return f"unconnected-({sym.ref}-Pad{pin.number})"
-    return f"unconnected-({sym.ref}{_unit_suffix(sym)}-{_escape_net(pin.name)}-Pad{pin.number})"
-
-
-@dataclass(slots=True)
-class PlacedPin:
-    symbol: PlacedSymbol
-    number: str
-    name: str
-    etype: str
-    x: float  # schematic coordinates of the connection point
-    y: float
-    dx: int  # outward unit direction (away from the body)
-    dy: int
-    net: str | None = None  # KiCad net name once connected / flagged
-
-    @property
-    def pos(self) -> tuple[float, float]:
-        return self.x, self.y
-
-
-@dataclass(slots=True)
-class PlacedSymbol:
-    ref: str
-    lib_id: str
-    x: float
-    y: float
-    rot: int
-    value: str
-    footprint: str
-    uuid: str
-    lib: Node
-    pins: dict[str, PlacedPin] = field(default_factory=dict)
-    fields: dict[str, str] = field(default_factory=dict)
-    in_bom: bool = True
-    on_board: bool = True
-    unit: int = 1
-    sheet: Schematic | None = None  # the sheet it is placed on
-
-    def pin(self, number: str) -> PlacedPin:
-        try:
-            return self.pins[str(number)]
-        except KeyError as exc:
-            raise KeyError(f"{self.ref} has no pin {number!r}") from exc
-
-    @property
-    def is_power(self) -> bool:
-        return child(self.lib, "power") is not None
+__all__ = [
+    "FONT",
+    "SCH_FORMAT",
+    "PlacedPin",
+    "PlacedSymbol",
+    "Schematic",
+    "pin_defs",
+    "pin_geometry",
+    "unconnected_net",
+    "unit_pin_defs",
+]
 
 
 class Schematic:
@@ -249,67 +162,15 @@ class Schematic:
         out: list[PlacedSymbol] = []
         for placed in by_ref.values():
             placed.sort(key=lambda ps: (ps[0], ps[1].unit))
-            units = [s for _page, s in placed]
-            if len(units) == 1:
-                out.append(units[0])
-                continue
-            first = units[0]
-            # pins of unit 0 (common to all units) appear in every placed unit: keep the
-            # copy that is connected (an open or no-connect copy yields to it), and refuse
-            # two copies on different nets
-            pins: dict[str, PlacedPin] = {}
-            for u in units:
-                for number, pin in u.pins.items():
-                    have = pins.get(number)
-                    if have is None or not _connected(have):
-                        pins[number] = pin
-                    elif _connected(pin) and pin.net != have.net:
-                        raise ValueError(
-                            f"{first.ref} pin {number}: {have.net} on unit {have.symbol.unit}, "
-                            f"{pin.net} on unit {u.unit}"
-                        )
-            out.append(
-                PlacedSymbol(
-                    ref=first.ref,
-                    lib_id=first.lib_id,
-                    x=first.x,
-                    y=first.y,
-                    rot=first.rot,
-                    value=first.value,
-                    footprint=first.footprint,
-                    uuid=first.uuid,
-                    lib=first.lib,
-                    pins=pins,
-                    fields=first.fields,
-                    in_bom=first.in_bom,
-                    on_board=first.on_board,
-                    unit=first.unit,
-                    sheet=first.sheet,
-                )
-            )
+            out.append(join_units([s for _page, s in placed]))
         return out
 
     # ------------------------------------------------------------------ geometry
 
-    @staticmethod
-    def _transform(
-        px: float, py: float, sx: float, sy: float, rot: int
-    ) -> tuple[float, float]:
-        """Library point (y up) → schematic point (y down) for a symbol at (sx, sy, rot)."""
-        a = math.radians(rot)
-        c, s = round(math.cos(a)), round(math.sin(a))
-        rx = px * c - py * s
-        ry = px * s + py * c
-        return sx + rx, sy - ry
-
-    @staticmethod
-    def _direction(angle: float, rot: int) -> tuple[int, int]:
-        """Outward unit vector (schematic coords) of a pin whose library angle points toward
-        the body."""
-        out = (angle + 180 + rot) % 360
-        return {0: (1, 0), 90: (0, -1), 180: (-1, 0), 270: (0, 1)}[
-            int(round(out / 90) * 90) % 360
-        ]
+    # library point -> sheet point, and a pin's outward direction (kept as static
+    # methods: generator scripts call sch._direction)
+    _transform = staticmethod(lib_to_sheet)
+    _direction = staticmethod(pin_direction)
 
     # ------------------------------------------------------------------ placement
 
@@ -511,251 +372,45 @@ class Schematic:
     # ------------------------------------------------------------------ output
 
     def _symbol_node(self, sym: PlacedSymbol) -> Node:
-        node: Node = [
-            S("symbol"),
-            [S("lib_id"), sym.lib_id],
-            [S("at"), num(sym.x), num(sym.y), sym.rot],
-            [S("unit"), sym.unit],
-            [S("body_style"), 1],
-            [S("exclude_from_sim"), S("no")],
-            [S("in_bom"), S("yes" if sym.in_bom else "no")],
-            [S("on_board"), S("yes" if sym.on_board else "no")],
-            [S("in_pos_files"), S("yes")],
-            [S("dnp"), S("no")],
-            [S("fields_autoplaced"), S("yes")],
-            [S("uuid"), sym.uuid],
-        ]
-        lib_props = {atom_text(p[1]): p for p in children(sym.lib, "property")}
-        values = {
-            "Reference": sym.ref,
-            "Value": sym.value,
-            "Footprint": sym.footprint,
-            "Datasheet": atom_text(lib_props["Datasheet"][2])
-            if "Datasheet" in lib_props
-            else "",
-            "Description": atom_text(lib_props["Description"][2])
-            if "Description" in lib_props
-            else "",
-        }
-        values.update(sym.fields)
-        order = ["Reference", "Value", "Footprint", "Datasheet", "Description"] + [
-            k
-            for k in sym.fields
-            if k not in values
-            or k not in ("Reference", "Value", "Footprint", "Datasheet", "Description")
-        ]
-        seen: set[str] = set()
-        for key in order:
-            if key in seen:
-                continue
-            seen.add(key)
-            lp = lib_props.get(key)
-            lp_at = child(lp, "at") if lp is not None else None
-            if lp is not None and lp_at is not None:
-                px, py = float(lp_at[1]), float(lp_at[2])
-                x, y = self._transform(px, py, sym.x, sym.y, sym.rot)
-                lp_eff = child(lp, "effects")
-                eff = clone(lp_eff) if lp_eff is not None else _effects()
-                hide = child(lp, "hide") is not None or child(eff, "hide") is not None
-            else:
-                x, y = sym.x, sym.y
-                eff = _effects()
-                hide = key not in ("Reference", "Value")
-            eff = [i for i in eff if not (isinstance(i, list) and head(i) == "hide")]
-            prop: Node = [
-                S("property"),
-                key,
-                values[key],
-                [S("at"), num(x), num(y), 0],
-            ]
-            if hide or (sym.is_power and key == "Reference"):
-                prop.append([S("hide"), S("yes")])
-            prop.append([S("show_name"), S("no")])
-            prop.append([S("do_not_autoplace"), S("no")])
-            prop.append(eff)
-            node.append(prop)
-        # every pin of the symbol, whichever unit this is, as KiCad writes an instance
-        numbers = dict.fromkeys(pin_geometry(p)[0] for p in pin_defs(sym.lib))
-        for number in numbers:
-            node.append(
-                [S("pin"), number, [S("uuid"), stable_uuid(sym.uuid, "pin", number)]]
-            )
-        node.append(
-            [
-                S("instances"),
-                [
-                    S("project"),
-                    self.project,
-                    [
-                        S("path"),
-                        self.path,
-                        [S("reference"), sym.ref],
-                        [S("unit"), sym.unit],
-                    ],
-                ],
-            ]
-        )
-        return node
+        return nodes.symbol(sym, self.project, self.path)
 
     def to_node(self) -> Node:
-        root: Node = [
-            S("kicad_sch"),
-            [S("version"), SCH_FORMAT],
-            [S("generator"), "inkibox"],
-            [S("generator_version"), "0.1"],
-            [S("uuid"), self.uuid],
-            [S("paper"), self.paper],
-        ]
-        if self.title or self.rev or self.company or self.comment:
-            tb: Node = [S("title_block")]
-            if self.title:
-                tb.append([S("title"), self.title])
-            if self.rev:
-                tb.append([S("rev"), self.rev])
-            if self.company:
-                tb.append([S("company"), self.company])
-            if self.comment:
-                tb.append([S("comment"), 1, self.comment])
+        root = nodes.header(self.uuid, self.paper)
+        tb = nodes.title_block(self.title, self.rev, self.company, self.comment)
+        if tb is not None:
             root.append(tb)
-        lib_symbols: Node = [S("lib_symbols")]
-        for lib_id in sorted(self.lib_symbols):
-            lib_symbols.append(self.lib_symbols[lib_id])
-        root.append(lib_symbols)
-        for i, (x, y) in enumerate(sorted(set(self.junctions))):
-            root.append(
-                [
-                    S("junction"),
-                    [S("at"), num(x), num(y)],
-                    [S("diameter"), 0],
-                    [S("color"), 0, 0, 0, 0],
-                    [S("uuid"), stable_uuid(self.uuid, "junction", str(i))],
-                ]
-            )
-        for i, (x, y) in enumerate(self.no_connects):
-            root.append(
-                [
-                    S("no_connect"),
-                    [S("at"), num(x), num(y)],
-                    [S("uuid"), stable_uuid(self.uuid, "nc", str(i), f"{x},{y}")],
-                ]
-            )
-        for i, (a, b) in enumerate(self.wires):
-            root.append(
-                [
-                    S("wire"),
-                    [
-                        S("pts"),
-                        [S("xy"), num(a[0]), num(a[1])],
-                        [S("xy"), num(b[0]), num(b[1])],
-                    ],
-                    [S("stroke"), [S("width"), 0], [S("type"), S("default")]],
-                    [S("uuid"), stable_uuid(self.uuid, "wire", str(i), f"{a}-{b}")],
-                ]
-            )
-        for i, (text, x, y, size) in enumerate(self.texts):
-            root.append(
-                [
-                    S("text"),
-                    text,
-                    [S("exclude_from_sim"), S("no")],
-                    [S("at"), num(x), num(y), 0],
-                    [
-                        S("effects"),
-                        [S("font"), [S("size"), num(size), num(size)]],
-                        [S("justify"), S("left"), S("bottom")],
-                    ],
-                    [S("uuid"), stable_uuid(self.uuid, "text", str(i))],
-                ]
-            )
-        for i, (name, x, y, angle, justify) in enumerate(self.labels):
-            root.append(
-                [
-                    S("label"),
-                    name,
-                    [S("at"), num(x), num(y), angle],
-                    _effects(FONT, *justify),
-                    [
-                        S("uuid"),
-                        stable_uuid(self.uuid, "label", str(i), name, f"{x},{y}"),
-                    ],
-                ]
-            )
-        for i, (name, x, y, angle, justify, shape) in enumerate(self.global_labels):
-            root.append(
-                [
-                    S("global_label"),
-                    name,
-                    [S("shape"), S(shape)],
-                    [S("at"), num(x), num(y), angle],
-                    [S("fields_autoplaced"), S("yes")],
-                    _effects(FONT, *justify),
-                    [
-                        S("uuid"),
-                        stable_uuid(self.uuid, "global", str(i), name, f"{x},{y}"),
-                    ],
-                    [
-                        S("property"),
-                        "Intersheetrefs",
-                        "${INTERSHEET_REFS}",
-                        [S("at"), num(x), num(y), 0],
-                        [S("hide"), S("yes")],
-                        [S("show_name"), S("no")],
-                        [S("do_not_autoplace"), S("no")],
-                        _effects(FONT, *justify),
-                    ],
-                ]
-            )
-        for sym in self.symbols:
-            root.append(self._symbol_node(sym))
-        pages = {
-            sh.sheet_uuid: str(i + 1) for i, sh in enumerate(self.root.all_sheets())
-        }
-        for sub, (x, y), (w, h) in self.sheets:
-            root.append(
-                [
-                    S("sheet"),
-                    [S("at"), num(x), num(y)],
-                    [S("size"), num(w), num(h)],
-                    [S("exclude_from_sim"), S("no")],
-                    [S("in_bom"), S("yes")],
-                    [S("on_board"), S("yes")],
-                    [S("dnp"), S("no")],
-                    [S("fields_autoplaced"), S("yes")],
-                    [S("stroke"), [S("width"), 0.1524], [S("type"), S("solid")]],
-                    [S("fill"), [S("color"), 0, 0, 0, 0]],
-                    [S("uuid"), sub.sheet_uuid],
-                    [
-                        S("property"),
-                        "Sheetname",
-                        sub.name,
-                        [S("at"), num(x), num(y - 0.7116), 0],
-                        [S("show_name"), S("no")],
-                        [S("do_not_autoplace"), S("no")],
-                        _effects(FONT, "left", "bottom"),
-                    ],
-                    [
-                        S("property"),
-                        "Sheetfile",
-                        sub.file,
-                        [S("at"), num(x), num(y + h + 0.5846), 0],
-                        [S("show_name"), S("no")],
-                        [S("do_not_autoplace"), S("no")],
-                        _effects(FONT, "left", "top"),
-                    ],
-                    [
-                        S("instances"),
-                        [
-                            S("project"),
-                            self.project,
-                            [S("path"), self.path, [S("page"), pages[sub.sheet_uuid]]],
-                        ],
-                    ],
-                ]
-            )
+        root.append(nodes.lib_symbols(self.lib_symbols))
+        root += self._drawing_nodes()
+        root += [self._symbol_node(sym) for sym in self.symbols]
+        root += self._sheet_nodes()
         if self.parent is None:
             root.append([S("sheet_instances"), [S("path"), "/", [S("page"), "1"]]])
         root.append([S("embedded_fonts"), S("no")])
         return root
+
+    def _drawing_nodes(self) -> list[Node]:
+        """Junctions, no-connect markers, wires, texts and labels, in KiCad's order."""
+        u = self.uuid
+        out = [
+            nodes.junction(u, i, at) for i, at in enumerate(sorted(set(self.junctions)))
+        ]
+        out += [nodes.no_connect(u, i, at) for i, at in enumerate(self.no_connects)]
+        out += [nodes.wire(u, i, a, b) for i, (a, b) in enumerate(self.wires)]
+        out += [nodes.text(u, i, *t) for i, t in enumerate(self.texts)]
+        out += [nodes.label(u, i, *lb) for i, lb in enumerate(self.labels)]
+        out += [
+            nodes.global_label(u, i, *gl) for i, gl in enumerate(self.global_labels)
+        ]
+        return out
+
+    def _sheet_nodes(self) -> list[Node]:
+        pages = {
+            sh.sheet_uuid: str(i + 1) for i, sh in enumerate(self.root.all_sheets())
+        }
+        return [
+            nodes.sheet(sub, at, size, self.project, self.path, pages[sub.sheet_uuid])
+            for sub, at, size in self.sheets
+        ]
 
     def write(self, path: Path) -> None:
         """Write this sheet to ``path`` and every sub-sheet next to it under its file name."""
