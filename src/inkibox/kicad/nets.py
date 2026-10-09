@@ -13,10 +13,11 @@ if TYPE_CHECKING:
 
 
 def escape_net(text: str) -> str:
-    """KiCad's net-name escaping (EscapeString, CTX_NETNAME): "/" separates sheets in a
-    net name, so one in a label or pin name becomes ``{slash}``; braces, backslashes,
-    quotes, spaces and the rest stay as they are (kicad-cli's netlist, KiCad 10)."""
-    return text.replace("/", "{slash}")
+    """KiCad's net-name escaping, ``EscapeString(…, CTX_NETNAME)`` in
+    common/string_utils.cpp: "/" separates sheets in a net name, so one in a label or
+    pin name becomes ``{slash}``; line feeds and carriage returns are dropped; every
+    other character (braces, backslashes, quotes, spaces, tabs …) stays as it is."""
+    return text.replace("\n", "").replace("\r", "").replace("/", "{slash}")
 
 
 def unit_suffix(sym: PlacedSymbol) -> str:

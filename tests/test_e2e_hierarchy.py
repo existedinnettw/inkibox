@@ -83,6 +83,13 @@ def make_project(root: Path) -> tuple[Schematic, Board]:
     r6 = sub.place("Device:R", "R6", (40 * g, 20 * g), value="1k", footprint=R0603)
     sub.label(r6.pin("1"), "A/B")
     sub.power(r6.pin("2"), "power:GND", rot=180)
+    # a line break in a global label: KiCad drops it from the net name (CTX_NETNAME)
+    r7 = sch.place("Device:R", "R7", (50 * g, 20 * g), value="1k", footprint=R0603)
+    sch.global_label(r7.pin("1"), "TWO\nLINES")
+    sch.power(r7.pin("2"), "power:GND", rot=180)
+    r8 = sub.place("Device:R", "R8", (50 * g, 20 * g), value="1k", footprint=R0603)
+    sub.global_label(r8.pin("1"), "TWO\nLINES")
+    sub.power(r8.pin("2"), "power:GND", rot=180)
     sch.power_at((10 * g, 10 * g), "power:+5V", flag=True)
     sch.power_at((14 * g, 10 * g), "power:GND", rot=180, flag=True)
     assert not sch.unconnected()
@@ -110,7 +117,7 @@ def make_project(root: Path) -> tuple[Schematic, Board]:
     pcb.place(comps["U1"], (110, 110))
     pcb.place(comps["R1"], (122, 105), 90, layer="B.Cu")
     pcb.place(comps["R2"], (122, 115), 30, layer="B.Cu")
-    for i, ref in enumerate(("R3", "R4", "R5", "R6")):
+    for i, ref in enumerate(("R3", "R4", "R5", "R6", "R7", "R8")):
         pcb.place(comps[ref], (104 + 4 * i, 104), 0)
     pcb.write(root / "t.kicad_pcb")
     return sch, pcb

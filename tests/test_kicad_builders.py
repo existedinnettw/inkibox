@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from inkibox.kicad import Board
 from inkibox.kicad.libs import pin_defs
 from inkibox.kicad.sexpr import atom_text, child, children, head
@@ -422,3 +424,104 @@ def test_stackup_copper_must_match_the_layer_count():
     )
     with pytest.raises(ValueError, match="do not match a 4-layer board"):
         Board("p", _Libs(), copper_layers=4, stackup=wrong)  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- KiCad's rules
+
+
+def test_net_names_escape_as_kicads_ctx_netname():
+    from inkibox.kicad.nets import escape_net
+
+    # EscapeString(…, CTX_NETNAME), common/string_utils.cpp: "/" -> {slash}
+    assert escape_net("USB/D+") == "USB{slash}D+"
+    # line feeds and carriage returns are dropped
+    assert escape_net("A\nB") == "AB"
+    assert escape_net("A\r\nB") == "AB"
+    # everything else stays
+    for text in (
+        "a{b}c",
+        "back\\slash",
+        'q"uote',
+        "sp ace",
+        "tab\there",
+        "~",
+        "$x:y.z",
+    ):
+        assert escape_net(text) == text
+
+
+def test_labels_with_line_breaks_name_kicads_net():
+    from inkibox.kicad import Schematic
+
+    sch = Schematic("p", _SymLibs())  # type: ignore[arg-type]
+    sub = sch.sheet("Sub", "sub.kicad_sch", (10, 10))
+    a = sub.place("L:A", "U1", (0, 0), unit=1)
+    sub.label(a.pin("1"), "TWO\nLINES")
+    sub.global_label(a.pin("8"), "V/CC\r\n")
+    assert a.pin("1").net == "/Sub/TWOLINES"
+    assert a.pin("8").net == "V{slash}CC"
+
+
+@pytest.mark.parametrize("name", ["A/B", "", "A\tB", "A\nB", "A\rB"])
+def test_sheet_names_kicad_refuses_are_refused(name):
+    from inkibox.kicad import Schematic
+
+    sch = Schematic("p", _SymLibs())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="sheet name"):
+        sch.sheet(name, "sub.kicad_sch", (10, 10))
+
+
+@pytest.mark.parametrize("file", ["", "a\nb.kicad_sch", "a\tb.kicad_sch"])
+def test_sheet_files_kicad_refuses_are_refused(file):
+    from inkibox.kicad import Schematic
+
+    sch = Schematic("p", _SymLibs())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="sheet file"):
+        sch.sheet("Sub", file, (10, 10))
+
+
+def test_sheet_files_in_a_subdirectory_are_fine():
+    from inkibox.kicad import Schematic
+
+    sch = Schematic("p", _SymLibs())  # type: ignore[arg-type]
+    sub = sch.sheet("Sub", "pages/sub.kicad_sch", (10, 10))
+    assert sub.file == "pages/sub.kicad_sch"
+
+
+def test_write_refuses_a_sub_sheet_on_the_output_file(tmp_path):
+    from inkibox.kicad import Schematic
+
+    # Given a sub-sheet whose file is the name the root is then written under
+    sch = Schematic("p", _SymLibs())  # type: ignore[arg-type]
+    sch.sheet("Sub", "main.kicad_sch", (10, 10))
+    # When / Then the write is refused, and nothing is written
+    with pytest.raises(ValueError, match="both be written"):
+        sch.write(tmp_path / "main.kicad_sch")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_write_refuses_nested_sheets_landing_on_one_file(tmp_path):
+    from inkibox.kicad import Schematic
+
+    # Given a nested sub-sheet in a subdirectory whose path meets another sheet's file
+    sch = Schematic("p", _SymLibs())  # type: ignore[arg-type]
+    a = sch.sheet("A", "pages/a.kicad_sch", (10, 10))
+    a.sheet("B", "b.kicad_sch", (10, 10))
+    sch.sheet("C", "pages/b.kicad_sch", (40, 10))
+    with pytest.raises(ValueError, match="both be written"):
+        sch.write(tmp_path / "p.kicad_sch")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_write_puts_every_sheet_where_output_files_says(tmp_path):
+    from inkibox.kicad import Schematic
+
+    sch = Schematic("p", _SymLibs())  # type: ignore[arg-type]
+    a = sch.sheet("A", "a.kicad_sch", (10, 10))
+    a.sheet("B", "b.kicad_sch", (10, 10))
+    sch.write(tmp_path / "p.kicad_sch")
+    assert sorted(f.name for f in tmp_path.iterdir()) == [
+        "a.kicad_sch",
+        "b.kicad_sch",
+        "p.kicad_sch",
+    ]

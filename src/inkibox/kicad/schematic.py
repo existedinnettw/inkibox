@@ -48,6 +48,31 @@ __all__ = [
 ]
 
 
+# characters KiCad's field validator refuses (common/validators.cpp, FIELD_VALIDATOR):
+# no field takes a line break or a tab, a sheet name no "/" (it separates sheets in
+# net names and hierarchy paths); neither may be empty
+FIELD_EXCLUDES = "\r\n\t"
+SHEET_NAME_EXCLUDES = FIELD_EXCLUDES + "/"
+
+
+def check_sheet_name(name: str) -> None:
+    bad = sorted({c for c in name if c in SHEET_NAME_EXCLUDES})
+    if not name or bad:
+        raise ValueError(
+            f"sheet name {name!r}: KiCad refuses an empty sheet name and the characters "
+            f"{', '.join(map(repr, bad)) or '(none here)'} in one"
+        )
+
+
+def check_sheet_file(file: str) -> None:
+    bad = sorted({c for c in file if c in FIELD_EXCLUDES})
+    if not file or bad:
+        raise ValueError(
+            f"sheet file {file!r}: KiCad refuses an empty file name and line breaks or "
+            "tabs in one"
+        )
+
+
 class Schematic:
     def __init__(
         self,
@@ -119,6 +144,8 @@ class Schematic:
         :meth:`global_label` and power symbols. Sheet names are unique among a sheet's
         sub-sheets, files across the project (a file placed twice would be a shared,
         multi-instance sheet, which this builder does not model)."""
+        check_sheet_name(name)
+        check_sheet_file(file)
         if any(s.name == name for s, _a, _z in self.sheets):
             raise ValueError(
                 f"sheet {self.sheet_names}: a sub-sheet named {name!r} exists"
@@ -413,10 +440,32 @@ class Schematic:
         ]
 
     def write(self, path: Path) -> None:
-        """Write this sheet to ``path`` and every sub-sheet next to it under its file name."""
+        """Write this sheet to ``path`` and every sub-sheet next to it under its file name.
+        Refused, before anything is written, when two sheets would land on one file (a
+        sub-sheet named like the output path, say)."""
+        targets = self.output_files(path)
+        seen: dict[Path, str] = {}
+        for sheet_names, target in targets:
+            key = target.resolve()
+            if key in seen:
+                raise ValueError(
+                    f"sheets {seen[key]} and {sheet_names} would both be written to {target}"
+                )
+            seen[key] = sheet_names
+        self._write_all(path)
+
+    def output_files(self, path: Path) -> list[tuple[str, Path]]:
+        """``(sheet path, file)`` of this sheet written to ``path`` and of every sheet
+        below it, each sub-sheet next to its parent's file."""
+        out = [(self.sheet_names, path)]
+        for sub, _at, _size in self.sheets:
+            out += sub.output_files(path.parent / sub.file)
+        return out
+
+    def _write_all(self, path: Path) -> None:
         write_pretty(path, self.to_node())
         for sub, _at, _size in self.sheets:
-            sub.write(path.parent / sub.file)
+            sub._write_all(path.parent / sub.file)
 
     # ------------------------------------------------------------------ netlist view
 
