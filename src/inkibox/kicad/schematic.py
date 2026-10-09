@@ -203,7 +203,15 @@ class Schematic:
     ) -> Schematic:
         """A sub-sheet ``name`` stored in ``file`` (next to this sheet's file), drawn as a
         sheet symbol at ``at``. It has no sheet pins: connect across sheets with
-        :meth:`global_label` and power symbols."""
+        :meth:`global_label` and power symbols. Sheet names are unique among a sheet's
+        sub-sheets, files across the project (a file placed twice would be a shared,
+        multi-instance sheet, which this builder does not model)."""
+        if any(s.name == name for s, _a, _z in self.sheets):
+            raise ValueError(
+                f"sheet {self.sheet_names}: a sub-sheet named {name!r} exists"
+            )
+        if file in {s.file for s in self.root.all_sheets()}:
+            raise ValueError(f"sheet file {file!r} is used already")
         sub = Schematic(
             self.project,
             self.libs,

@@ -236,6 +236,19 @@ class Board:
             raise ValueError(
                 f"copper_layers must be even, 2 to 32 (KiCad's limit), not {copper_layers}"
             )
+        if stackup is not None:
+            want = ["F.Cu", *[f"In{i}.Cu" for i in range(1, copper_layers - 1)], "B.Cu"]
+            have = [
+                atom_text(row[1])
+                for row in children(stackup, "layer")
+                if (kind := child(row, "type")) is not None
+                and atom_text(kind[1]) == "copper"
+            ]
+            if have != want:
+                raise ValueError(
+                    f"stackup copper layers {have} do not match a {copper_layers}-layer "
+                    f"board ({want})"
+                )
         self.project = project
         self.libs = libs
         self.copper_layers = copper_layers

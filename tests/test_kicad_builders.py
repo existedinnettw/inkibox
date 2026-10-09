@@ -190,7 +190,8 @@ def test_back_side_footprints_are_mirrored_top_to_bottom():
 def test_inner_layers_and_stackup_are_written():
     from inkibox.kicad.board import stackup
 
-    st = stackup([("F.Cu", "copper", 0.035, {}), ("B.Cu", "copper", 0.035, {})])
+    cu = ["F.Cu", "In1.Cu", "In2.Cu", "In3.Cu", "In4.Cu", "B.Cu"]
+    st = stackup([(n, "copper", 0.035, {}) for n in cu])
     pcb = Board("p", _Libs(), copper_layers=6, stackup=st)  # type: ignore[arg-type]
     root = pcb.to_node()
     names = [row[1] for row in child(root, "layers")[1:]][:6]
@@ -346,3 +347,78 @@ def test_copper_layer_count_must_be_even_and_at_least_two():
     for bad in (0, 1, 3, 33):
         with pytest.raises(ValueError):
             Board("p", _Libs(), copper_layers=bad)  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- input validation
+
+
+def test_a_unit_the_symbol_does_not_define_is_refused():
+    import pytest
+
+    from inkibox.kicad import Schematic
+    from inkibox.kicad.libs import unit_pin_defs
+
+    single = parse(
+        '(symbol "R" (symbol "R_0_1" (pin passive line (at 0 2.54 270) (name "~") (number "1")))'
+        ' (symbol "R_1_1" (pin passive line (at 0 -2.54 90) (name "~") (number "2"))))'
+    )
+    # a single-unit symbol: unit 1 is all its pins, unit 2 does not exist
+    assert len(unit_pin_defs(single, 1)) == 2
+    with pytest.raises(ValueError, match=r"symbol R has no unit 2 \(units: \[1\]\)"):
+        unit_pin_defs(single, 2)
+    # a multi-unit symbol: each defined unit, nothing past them
+    two = parse(TWO_UNITS)
+    assert len(unit_pin_defs(two, 2)) == 2
+    with pytest.raises(ValueError, match=r"no unit 9 \(units: \[1, 2\]\)"):
+        unit_pin_defs(two, 9)
+    with pytest.raises(ValueError, match="no unit 0"):
+        unit_pin_defs(two, 0)
+    # and place() refuses it before writing an instance of nothing
+    sch = Schematic("p", _SymLibs())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="no unit 3"):
+        sch.place("L:A", "U1", (0, 0), unit=3)
+    assert sch.symbols == []
+
+
+def test_sheet_names_and_files_must_be_unique():
+    import pytest
+
+    from inkibox.kicad import Schematic
+
+    sch = Schematic("p", _SymLibs())  # type: ignore[arg-type]
+    a = sch.sheet("Power", "power.kicad_sch", (10, 10))
+    with pytest.raises(ValueError, match="named 'Power'"):
+        sch.sheet("Power", "power2.kicad_sch", (40, 10))
+    with pytest.raises(ValueError, match="'power.kicad_sch' is used"):
+        a.sheet("Sub", "power.kicad_sch", (10, 10))  # anywhere in the project
+    with pytest.raises(ValueError, match="'p.kicad_sch' is used"):
+        sch.sheet("Root again", "p.kicad_sch", (40, 10))
+    a.sheet(
+        "Power", "inner.kicad_sch", (10, 10)
+    )  # the same name one level down is fine
+
+
+def test_back_side_is_the_only_other_side():
+    import pytest
+
+    pcb = Board("p", _Libs())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="F.Cu or B.Cu"):
+        pcb.place(None, (0, 0), ref="R1", lib_id="L:T", layer="In1.Cu")
+
+
+def test_stackup_copper_must_match_the_layer_count():
+    import pytest
+
+    from inkibox.kicad.board import stackup
+
+    four = stackup(
+        [(n, "copper", 0.035, {}) for n in ("F.Cu", "In1.Cu", "In2.Cu", "B.Cu")]
+    )
+    Board("p", _Libs(), copper_layers=4, stackup=four)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="do not match a 6-layer board"):
+        Board("p", _Libs(), copper_layers=6, stackup=four)  # type: ignore[arg-type]
+    wrong = stackup(
+        [(n, "copper", 0.035, {}) for n in ("F.Cu", "In3.Cu", "In4.Cu", "B.Cu")]
+    )
+    with pytest.raises(ValueError, match="do not match a 4-layer board"):
+        Board("p", _Libs(), copper_layers=4, stackup=wrong)  # type: ignore[arg-type]
