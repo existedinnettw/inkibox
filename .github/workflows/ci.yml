@@ -56,3 +56,25 @@ jobs:
         with:
           name: dist
           path: dist/
+
+  e2e:
+    # the kicad-cli end-to-end tests (tests/test_e2e*.py): KiCad judges what inkibox writes
+    # (ERC, DRC with schematic parity, its own netlist), in KiCad's official image
+    needs: lint
+    runs-on: ubuntu-latest
+    container:
+      image: kicad/kicad:10.0.6-full
+      options: --user root
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          python-version: "3.13"
+      - name: KiCad's global library tables (created on first start in the GUI)
+        run: |
+          mkdir -p "$HOME/.config/kicad/10.0"
+          cp /usr/share/kicad/template/sym-lib-table /usr/share/kicad/template/fp-lib-table "$HOME/.config/kicad/10.0/"
+      - run: uv sync --locked
+      - run: uv run pytest -q tests/test_e2e.py tests/test_e2e_hierarchy.py

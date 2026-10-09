@@ -6,215 +6,64 @@ same number."""
 from __future__ import annotations
 
 import itertools
-import math
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from sexpdata import Symbol
 
+from .footprint_place import (
+    PlacedFootprint,
+    PlacedPad,
+    field_values,
+    flipped,
+    link_symbol,
+    new_node,
+    place_pad,
+    set_fields,
+    set_in_bom,
+    stamp_items,
+)
+from .footprint_place import insert_after as _insert_after  # noqa: F401 - former home
+from .footprint_place import place_zone as _place_zone  # noqa: F401
+from .footprint_place import rotate_text as _rotate_text  # noqa: F401
+from .geometry import arc_extent as _arc_extent  # noqa: F401
+from .geometry import distance, fp_bbox, rotate
+from .geometry import pad_points as _pad_points  # noqa: F401
+from .geometry import shape_points as _shape_points  # noqa: F401
 from .libs import Libraries
-from .schematic import PlacedSymbol
+from .placed import PlacedSymbol
 from .sexpr import (
     Node,
     S,
-    atom_text,
     atoms_of,
     child,
     children,
     clone,
-    head,
     num,
-    replace_child,
     stable_uuid,
     write_pretty,
 )
+from .stackup import (
+    LAYERS,
+    check_copper_layers,
+    check_stackup,
+    inner_layers,
+    layers_node,
+    stackup,
+)
 
 PCB_FORMAT = 20260206
+_fp_bbox = fp_bbox  # former name, kept for callers
 
-LAYERS: list[tuple[int, str, str, str | None]] = [
-    (0, "F.Cu", "signal", None),
-    (2, "B.Cu", "signal", None),
-    (9, "F.Adhes", "user", "F.Adhesive"),
-    (11, "B.Adhes", "user", "B.Adhesive"),
-    (13, "F.Paste", "user", None),
-    (15, "B.Paste", "user", None),
-    (5, "F.SilkS", "user", "F.Silkscreen"),
-    (7, "B.SilkS", "user", "B.Silkscreen"),
-    (1, "F.Mask", "user", None),
-    (3, "B.Mask", "user", None),
-    (17, "Dwgs.User", "user", "User.Drawings"),
-    (19, "Cmts.User", "user", "User.Comments"),
-    (21, "Eco1.User", "user", "User.Eco1"),
-    (23, "Eco2.User", "user", "User.Eco2"),
-    (25, "Edge.Cuts", "user", None),
-    (27, "Margin", "user", None),
-    (31, "F.CrtYd", "user", "F.Courtyard"),
-    (29, "B.CrtYd", "user", "B.Courtyard"),
-    (35, "F.Fab", "user", None),
-    (33, "B.Fab", "user", None),
+__all__ = [
+    "LAYERS",
+    "PCB_FORMAT",
+    "Board",
+    "PlacedFootprint",
+    "PlacedPad",
+    "distance",
+    "rotate",
+    "stackup",
 ]
-
-
-@dataclass(slots=True)
-class PlacedPad:
-    number: str
-    x: float  # board coordinates
-    y: float
-    kind: str  # smd | thru_hole | np_thru_hole | connect
-    shape: str
-    size: tuple[float, float]
-    layers: frozenset[str]  # {"F.Cu"}, {"B.Cu"} or both
-    net: str | None
-    drill: float = 0.0  # hole diameter, 0 for SMD
-    angle: float = (
-        0.0  # orientation on the board (degrees, KiCad's sense), ``size`` before it
-    )
-
-    @property
-    def radius(self) -> float:
-        return max(self.size) / 2
-
-
-@dataclass(slots=True)
-class PlacedFootprint:
-    ref: str
-    lib_id: str
-    x: float
-    y: float
-    rot: float
-    layer: str
-    node: Node
-    pads: dict[str, PlacedPad] = field(default_factory=dict)  # first pad of each number
-    all_pads: list[PlacedPad] = field(
-        default_factory=list
-    )  # every pad, duplicates included
-
-    def pad(self, number: str) -> PlacedPad:
-        return self.pads[str(number)]
-
-
-def _xy(item: Node, key: str) -> tuple[float, float] | None:
-    c = child(item, key)
-    if c is None:
-        return None
-    a = atoms_of(c)
-    return float(a[0]), float(a[1])
-
-
-def _arc_extent(
-    s: tuple[float, float], m: tuple[float, float], e: tuple[float, float]
-) -> list[tuple[float, float]]:
-    """Points that bound the arc from ``s`` through ``m`` to ``e``: its ends and every
-    axis-extreme point of its circle that the arc passes."""
-    ax, ay = s
-    bx, by = m
-    cx, cy = e
-    d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
-    if abs(d) < 1e-12:  # collinear: a straight segment
-        return [s, m, e]
-    a2, b2, c2 = ax * ax + ay * ay, bx * bx + by * by, cx * cx + cy * cy
-    ox = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / d
-    oy = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / d
-    r = math.hypot(ax - ox, ay - oy)
-    tau = 2 * math.pi
-
-    def ang(p: tuple[float, float]) -> float:
-        return math.atan2(p[1] - oy, p[0] - ox) % tau
-
-    t_s, t_m, t_e = ang(s), ang(m), ang(e)
-    span = (t_e - t_s) % tau or tau
-    if (t_m - t_s) % tau > span:  # the arc runs the other way: walk it from e to s
-        t_s, span = t_e, tau - span
-    pts = [s, e]
-    for k in range(4):
-        phi = k * math.pi / 2
-        if (phi - t_s) % tau <= span + 1e-9:
-            pts.append((ox + r * math.cos(phi), oy + r * math.sin(phi)))
-    return pts
-
-
-def _shape_points(item: Node) -> list[tuple[float, float]]:
-    """Points whose bounding box is that of a graphic (``fp_*`` or a custom pad's ``gr_*``
-    primitive), in its own coordinates; stroke width is not included."""
-    kind = (head(item) or "")[3:]
-    if kind == "circle":
-        c, e = _xy(item, "center"), _xy(item, "end")
-        if c is None or e is None:
-            return []
-        r = math.hypot(e[0] - c[0], e[1] - c[1])
-        return [(c[0] - r, c[1] - r), (c[0] + r, c[1] + r)]
-    if kind == "arc":
-        s, m, e = _xy(item, "start"), _xy(item, "mid"), _xy(item, "end")
-        if s is None or e is None:
-            return []
-        return _arc_extent(s, m, e) if m is not None else [s, e]
-    pts = [p for p in (_xy(item, k) for k in ("start", "end")) if p is not None]
-    p = child(item, "pts")
-    if p is not None:
-        for seg in p[1:]:
-            h = head(seg)
-            if h == "xy":
-                a = atoms_of(seg)
-                pts.append((float(a[0]), float(a[1])))
-            elif h == "arc":  # a polygon edge that is an arc
-                s, m, e = _xy(seg, "start"), _xy(seg, "mid"), _xy(seg, "end")
-                if s is not None and m is not None and e is not None:
-                    pts += _arc_extent(s, m, e)
-    return pts  # line, rect, poly; a bezier lies within its control points
-
-
-def _pad_points(pad: Node) -> list[tuple[float, float]]:
-    """Points whose bounding box is that of a pad's copper, in footprint coordinates."""
-    at = atoms_of(child(pad, "at") or [S("at"), 0, 0])
-    x, y = float(at[0]), float(at[1])
-    rot = float(at[2]) if len(at) > 2 else 0.0
-    size = atoms_of(child(pad, "size") or [S("size"), 0, 0])
-    w, h = float(size[0]) / 2, float(size[1]) / 2
-    a = atoms_of(pad)
-    shape = atom_text(a[2]) if len(a) > 2 else "rect"
-    if shape == "circle":
-        return [(x - w, y - w), (x + w, y + w)]
-    if shape == "trapezoid":  # rect_delta widens one pair of sides
-        delta = child(pad, "rect_delta")
-        if delta is not None:
-            dx, dy = (float(v) for v in atoms_of(delta)[:2])
-            w, h = w + abs(dy) / 2, h + abs(dx) / 2
-    local = [(-w, -h), (w, -h), (w, h), (-w, h)]
-    if shape == "custom":
-        prims = child(pad, "primitives")
-        if prims is not None:
-            for g in prims[1:]:
-                if isinstance(g, list):
-                    local += _shape_points(g)
-    return [(x + px, y + py) for px, py in (rotate(qx, qy, rot) for qx, qy in local)]
-
-
-def _fp_bbox(
-    node: Node, layer_filter: str | None = "F.CrtYd"
-) -> tuple[float, float, float, float]:
-    """Bounding box (footprint coordinates) of the graphics on ``layer_filter`` (all graphics
-    when it has none) and the pads. Circles and arcs count by their true extent, pads by
-    their shape and rotation."""
-    pts: list[tuple[float, float]] = []
-    for item in node[1:]:
-        if not isinstance(item, list):
-            continue
-        h = head(item) or ""
-        if h.startswith("fp_") and h != "fp_text":
-            lay = child(item, "layer")
-            if layer_filter is None or (
-                lay is not None and atom_text(lay[1]) == layer_filter
-            ):
-                pts += _shape_points(item)
-    if not pts and layer_filter is not None:
-        return _fp_bbox(node, None)
-    for pad in children(node, "pad"):
-        pts += _pad_points(pad)
-    if not pts:
-        return 0.0, 0.0, 0.0, 0.0
-    xs = [p[0] for p in pts]
-    ys = [p[1] for p in pts]
-    return min(xs), min(ys), max(xs), max(ys)
 
 
 class Board:
@@ -227,9 +76,18 @@ class Board:
         paper: str = "A4",
         title: str = "",
         sheet_file: str | None = None,
+        copper_layers: int = 2,
+        stackup: Node | None = None,
     ) -> None:
+        """``copper_layers`` is an even number (2, 4, … 32); ``stackup`` an optional
+        ``(stackup …)`` node for the board setup (see :func:`stackup`)."""
+        check_copper_layers(copper_layers)
+        if stackup is not None:
+            check_stackup(stackup, copper_layers)
         self.project = project
         self.libs = libs
+        self.copper_layers = copper_layers
+        self.stackup = stackup
         self.thickness = thickness
         self.paper = paper
         self.title = title
@@ -238,7 +96,7 @@ class Board:
         self.outline: list[Node] = []
         self.footprints: list[PlacedFootprint] = []
         self.segments: list[tuple[float, float, float, float, float, str, str]] = []
-        self.vias: list[tuple[float, float, float, float, str]] = []
+        self.vias: list[tuple[float, float, float, float, str, tuple[str, str]]] = []
         self.zones: list[Node] = []
         self.texts: list[Node] = []
         self._fp_cache: dict[str, Node] = {}
@@ -279,7 +137,7 @@ class Board:
 
     def footprint_size(self, lib_id: str) -> tuple[float, float, float, float]:
         """Courtyard bounding box of a library footprint in its own coordinates."""
-        return _fp_bbox(self.library_footprint(lib_id))
+        return fp_bbox(self.library_footprint(lib_id))
 
     def place(
         self,
@@ -301,172 +159,42 @@ class Board:
             value = value if value is not None else symbol.value
         if not ref or not lib_id:
             raise ValueError("place() needs a symbol or ref + lib_id")
-        if layer != "F.Cu":
-            raise NotImplementedError("only front-side placement is supported")
+        if layer not in ("F.Cu", "B.Cu"):
+            raise ValueError(f"a footprint goes on F.Cu or B.Cu, not {layer}")
+        back = layer == "B.Cu"
         lib = clone(self.library_footprint(lib_id))
-        fx, fy = at
-        node: Node = [S("footprint"), lib_id]
-        for item in lib[2:]:
-            if isinstance(item, list) and head(item) in (
-                "version",
-                "generator",
-                "generator_version",
-                "layer",
-            ):
-                continue
-            node.append(item)
-        node.insert(2, [S("layer"), layer])
-        node.insert(3, [S("uuid"), stable_uuid(self.project, "footprint", ref)])
-        node.insert(
-            4,
-            [S("at"), num(fx), num(fy), num(rot)]
-            if rot
-            else [S("at"), num(fx), num(fy)],
+        if back:
+            lib = flipped(lib, rot, at, self.copper_layers)
+        uuid = stable_uuid(self.project, "footprint", ref)
+        node = new_node(lib, lib_id, layer, uuid, at, rot)
+        set_fields(
+            node,
+            field_values(symbol, ref, value),
+            project=self.project,
+            ref=ref,
+            rot=rot,
+            back=back,
+            hide_reference=hide_reference,
         )
-        # properties: Reference / Value from the symbol, Datasheet / Description too so that
-        # `kicad-cli pcb drc --schematic-parity` sees no field mismatch
-        values = {"Reference": ref, "Value": value or ""}
-        if symbol is not None:
-            lib_props = {
-                atom_text(p[1]): atom_text(p[2])
-                for p in children(symbol.lib, "property")
-            }
-            values["Datasheet"] = symbol.fields.get(
-                "Datasheet", lib_props.get("Datasheet", "")
-            )
-            values["Description"] = symbol.fields.get(
-                "Description", lib_props.get("Description", "")
-            )
-        seen_props: set[str] = set()
-        for prop in children(node, "property"):
-            key = atom_text(prop[1])
-            seen_props.add(key)
-            if key in values:
-                prop[2] = values[key]
-            if key == "Reference" and hide_reference and child(prop, "hide") is None:
-                replace_child(prop, "hide", [S("hide"), S("yes")])
-            _rotate_text(prop, rot)
-            replace_child(
-                prop, "uuid", [S("uuid"), stable_uuid(self.project, ref, "prop", key)]
-            )
-        for key in ("Datasheet", "Description"):
-            if key in values and key not in seen_props:
-                node.append(
-                    [
-                        S("property"),
-                        key,
-                        values[key],
-                        [S("at"), 0, 0, num(rot)],
-                        [S("layer"), "F.Fab"],
-                        [S("hide"), S("yes")],
-                        [S("uuid"), stable_uuid(self.project, ref, "prop", key)],
-                        [
-                            S("effects"),
-                            [
-                                S("font"),
-                                [S("size"), 1.27, 1.27],
-                                [S("thickness"), 0.15],
-                            ],
-                        ],
-                    ]
-                )
-        for txt in children(node, "fp_text"):
-            _rotate_text(txt, rot)
         if in_bom is not None:
-            attr = child(node, "attr")
-            flags = [
-                a
-                for a in (atoms_of(attr) if attr is not None else [])
-                if atom_text(a) != "exclude_from_bom"
-            ]
-            if not in_bom:
-                flags.append(S("exclude_from_bom"))
-            replace_child(node, "attr", [S("attr"), *flags] if flags else None)
+            set_in_bom(node, in_bom)
         if symbol is not None:
-            node.append([S("path"), f"/{symbol.uuid}"])
-            node.append([S("sheetname"), "/"])
-            node.append([S("sheetfile"), self.sheet_file])
-        fp = PlacedFootprint(ref, lib_id, fx, fy, rot, layer, node)
+            link_symbol(node, symbol, self.sheet_file)
+        fp = PlacedFootprint(ref, lib_id, at[0], at[1], rot, layer, node)
+        copper = ["F.Cu", "B.Cu", *self.inner_layers]
         for pad in children(node, "pad"):
-            a = atoms_of(pad)
-            number = atom_text(a[0]) if a else ""
-            kind = atom_text(a[1]) if len(a) > 1 else "smd"
-            shape = atom_text(a[2]) if len(a) > 2 else "circle"
-            at_node = child(pad, "at")
-            pa = atoms_of(at_node) if at_node is not None else [0, 0]
-            px, py = float(pa[0]), float(pa[1])
-            pang = float(pa[2]) if len(pa) > 2 else 0.0
-            if rot:
-                replace_child(
-                    pad, "at", [S("at"), num(px), num(py), num((pang + rot) % 360)]
-                )
-            rx, ry = rotate(px, py, rot)
-            size_node = child(pad, "size")
-            sz = atoms_of(size_node) if size_node is not None else [0, 0]
-            layers_node = child(pad, "layers")
-            lay_atoms = (
-                [atom_text(v) for v in atoms_of(layers_node)] if layers_node else []
-            )
-            cu = frozenset(
-                lay
-                for lay in ("F.Cu", "B.Cu")
-                if any(v in ("*.Cu", lay) for v in lay_atoms)
-            )
-            net: str | None = None
-            if symbol is not None and number and kind != "np_thru_hole":
-                pin = symbol.pins.get(number)
-                if pin is not None and pin.net is not None:
-                    net = pin.net
-                    _insert_after_layers(pad, [S("net"), net])
-                    _insert_after_layers(pad, [S("pintype"), pin.etype], after="net")
-                    _insert_after_layers(pad, [S("pinfunction"), pin.name], after="net")
-            replace_child(
-                pad,
-                "uuid",
-                [
-                    S("uuid"),
-                    stable_uuid(self.project, ref, "pad", number, f"{px},{py}"),
-                ],
-            )
-            drill_node = child(pad, "drill")
-            drill = 0.0
-            if drill_node is not None:
-                nums = [
-                    float(v) for v in atoms_of(drill_node) if isinstance(v, int | float)
-                ]
-                drill = max(nums) if nums else 0.0
-            placed = PlacedPad(
-                number,
-                num(fx + rx),
-                num(fy + ry),
-                kind,
-                shape,
-                (float(sz[0]), float(sz[1])),
-                cu,
-                net,
-                drill,
-                (pang + rot) % 360,
+            placed = place_pad(
+                pad, fp, symbol, project=self.project, copper=copper, back=back
             )
             fp.all_pads.append(placed)
-            fp.pads.setdefault(number, placed)
-        # stable uuids for the graphics and texts, by their place in the footprint: libraries
-        # often ship `fp_text user "${REFERENCE}"` without one, and KiCad would make one up
-        for index, item in enumerate(node):
-            kind = head(item)
-            if kind in ("fp_line", "fp_rect", "fp_arc", "fp_circle", "fp_poly"):
-                key = ("gfx", str(index))
-            elif kind == "fp_text":
-                key = ("fp_text", str(index))
-            elif kind == "zone":
-                key = ("zone", str(index))
-                _place_zone(item, fx, fy, rot)
-            else:
-                continue
-            replace_child(
-                item, "uuid", [S("uuid"), stable_uuid(self.project, ref, *key)]
-            )
+            fp.pads.setdefault(placed.number, placed)
+        stamp_items(node, project=self.project, ref=ref, back=back, at=at, rot=rot)
         self.footprints.append(fp)
         return fp
+
+    @property
+    def inner_layers(self) -> list[str]:
+        return inner_layers(self.copper_layers)
 
     # ------------------------------------------------------------------ copper
 
@@ -480,9 +208,15 @@ class Board:
                 )
 
     def via(
-        self, at: tuple[float, float], net: str, size: float = 0.8, drill: float = 0.4
+        self,
+        at: tuple[float, float],
+        net: str,
+        size: float = 0.8,
+        drill: float = 0.4,
+        layers: tuple[str, str] = ("F.Cu", "B.Cu"),
     ) -> None:
-        self.vias.append((num(at[0]), num(at[1]), size, drill, net))
+        """A via; ``layers`` other than F.Cu–B.Cu make it blind or buried."""
+        self.vias.append((num(at[0]), num(at[1]), size, drill, net, layers))
 
     def zone(
         self,
@@ -621,100 +355,55 @@ class Board:
         ]
         if self.title:
             root.append([S("title_block"), [S("title"), self.title]])
-        layers: Node = [S("layers")]
-        for idx, name, kind, user in LAYERS:
-            row: Node = [S("layers"), idx, name, S(kind)]
-            row = [idx, name, S(kind)] + ([user] if user else [])
-            layers.append(row)
-        root.append(layers)
-        root.append(
-            [
-                S("setup"),
-                [S("pad_to_mask_clearance"), 0],
-                [S("allow_soldermask_bridges_in_footprints"), S("no")],
-            ]
-        )
+        root.append(layers_node(self.copper_layers))
+        root.append(self._setup_node())
         root.extend(self.outline)
         root.extend(self.texts)
-        for fp in self.footprints:
-            root.append(fp.node)
-        for i, (x1, y1, x2, y2, w, layer, net) in enumerate(self.segments):
-            root.append(
-                [
-                    S("segment"),
-                    [S("start"), num(x1), num(y1)],
-                    [S("end"), num(x2), num(y2)],
-                    [S("width"), num(w)],
-                    [S("layer"), layer],
-                    [S("net"), net],
-                    [
-                        S("uuid"),
-                        stable_uuid(
-                            self.project, "segment", str(i), f"{x1},{y1},{x2},{y2}"
-                        ),
-                    ],
-                ]
-            )
-        for i, (x, y, size, drill, net) in enumerate(self.vias):
-            root.append(
-                [
-                    S("via"),
-                    [S("at"), num(x), num(y)],
-                    [S("size"), num(size)],
-                    [S("drill"), num(drill)],
-                    [S("layers"), "F.Cu", "B.Cu"],
-                    [S("net"), net],
-                    [S("uuid"), stable_uuid(self.project, "via", str(i), f"{x},{y}")],
-                ]
-            )
+        root += [fp.node for fp in self.footprints]
+        root += [self._segment_node(i, seg) for i, seg in enumerate(self.segments)]
+        root += [self._via_node(i, via) for i, via in enumerate(self.vias)]
         root.extend(self.zones)
         root.append([S("embedded_fonts"), S("no")])
         return root
 
+    def _setup_node(self) -> Node:
+        setup: Node = [S("setup")]
+        if self.stackup is not None:
+            setup.append(self.stackup)
+        setup += [
+            [S("pad_to_mask_clearance"), 0],
+            [S("allow_soldermask_bridges_in_footprints"), S("no")],
+        ]
+        return setup
+
+    def _segment_node(self, i: int, seg: tuple) -> Node:
+        x1, y1, x2, y2, w, layer, net = seg
+        return [
+            S("segment"),
+            [S("start"), num(x1), num(y1)],
+            [S("end"), num(x2), num(y2)],
+            [S("width"), num(w)],
+            [S("layer"), layer],
+            [S("net"), net],
+            [
+                S("uuid"),
+                stable_uuid(self.project, "segment", str(i), f"{x1},{y1},{x2},{y2}"),
+            ],
+        ]
+
+    def _via_node(self, i: int, via: tuple) -> Node:
+        x, y, size, drill, net, vlayers = via
+        through = tuple(vlayers) == ("F.Cu", "B.Cu")
+        return [
+            S("via"),
+            *([] if through else [S("blind")]),
+            [S("at"), num(x), num(y)],
+            [S("size"), num(size)],
+            [S("drill"), num(drill)],
+            [S("layers"), *vlayers],
+            [S("net"), net],
+            [S("uuid"), stable_uuid(self.project, "via", str(i), f"{x},{y}")],
+        ]
+
     def write(self, path: Path) -> None:
         write_pretty(path, self.to_node())
-
-
-def rotate(x: float, y: float, angle_deg: float) -> tuple[float, float]:
-    """A point turned like KiCad's ``RotatePoint`` (y down, positive angles counter-clockwise
-    on screen)."""
-    if angle_deg % 360 == 0:
-        return x, y
-    a = math.radians(angle_deg)
-    c, s = math.cos(a), math.sin(a)
-    return x * c + y * s, -x * s + y * c
-
-
-def _rotate_text(item: Node, rot: float) -> None:
-    """KiCad stores text orientation inside a footprint as an absolute angle."""
-    if not rot:
-        return
-    at = child(item, "at")
-    if at is None:
-        return
-    a = atoms_of(at)
-    x, y = float(a[0]), float(a[1])
-    ang = float(a[2]) if len(a) > 2 else 0.0
-    replace_child(item, "at", [S("at"), num(x), num(y), num((ang + rot) % 360)])
-
-
-def _place_zone(zone: Node, fx: float, fy: float, rot: float) -> None:
-    """A footprint's own zone (a keepout, a pour) is stored in board coordinates in a
-    .kicad_pcb, unlike the rest of the footprint: move its outline with the footprint."""
-    for poly in children(zone, "polygon"):
-        for pts in children(poly, "pts"):
-            for xy in children(pts, "xy"):
-                x, y = rotate(float(xy[1]), float(xy[2]), rot)
-                xy[1], xy[2] = num(fx + x), num(fy + y)
-
-
-def _insert_after_layers(pad: Node, new: Node, after: str = "layers") -> None:
-    for i, item in enumerate(pad):
-        if isinstance(item, list) and head(item) == after:
-            pad.insert(i + 1, new)
-            return
-    pad.append(new)
-
-
-def distance(a: tuple[float, float], b: tuple[float, float]) -> float:
-    return math.hypot(a[0] - b[0], a[1] - b[1])

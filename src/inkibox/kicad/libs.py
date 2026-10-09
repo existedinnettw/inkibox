@@ -138,6 +138,32 @@ def pin_defs(symbol: Node) -> list[Node]:
     return pins
 
 
+def unit_pin_defs(symbol: Node, unit: int) -> list[Node]:
+    """The pins of unit ``unit`` (``<name>_<unit>_<style>``) and of unit 0, which is common
+    to every unit; body style 1 only. A symbol with one unit gets all its pins. A unit the
+    symbol does not define is an error (KiCad would show an instance of nothing)."""
+    units = {
+        int(atom_text(u[1]).rsplit("_", 2)[-2])
+        for u in children(symbol, "symbol")
+        if atom_text(u[1]).rsplit("_", 2)[-2].isdigit()
+    }
+    defined = sorted(units - {0}) or [1]
+    if unit not in defined:
+        name = atom_text(symbol[1]) if len(symbol) > 1 else "?"
+        raise ValueError(f"symbol {name} has no unit {unit} (units: {defined})")
+    if len(defined) == 1:
+        return pin_defs(symbol)
+    pins: list[Node] = []
+    for sub in children(symbol, "symbol"):
+        parts = atom_text(sub[1]).rsplit("_", 2)
+        if len(parts) < 3 or not parts[-2].isdigit():
+            continue
+        u, style = int(parts[-2]), parts[-1]
+        if u in (0, unit) and style in ("0", "1"):
+            pins.extend(children(sub, "pin"))
+    return pins
+
+
 def pin_geometry(pin: Node) -> tuple[str, str, float, float, float, float]:
     """``(number, name, x, y, angle, length)`` of a library pin (library coordinates, y up).
     ``(x, y)`` is the connection point; ``angle`` is the direction toward the body."""
