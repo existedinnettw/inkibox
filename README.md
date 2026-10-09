@@ -97,17 +97,17 @@ clearance_overrides = true
 models_3d = true
 ```
 
-`--set footprints.models_3d=false` overrides one on the command line.
+`--set footprints.models_3d=false` overrides one on the command line. The options that only
+move or restyle text (field visibilities/effects/positions, pin text visibility, footprint
+text layers/effects/positions) and re-linking by reference are not implemented headless:
+setting one is an error, so a design never depends on them silently.
 
 A board that is placed but not yet routed can still gate everything else in CI:
 
 ```toml
 [tool.inkibox.check]
 allow_unconnected = true   # DRC passes with unconnected items; every other finding fails
-``` The options that only
-move or restyle text (field visibilities/effects/positions, pin text visibility, footprint
-text layers/effects/positions) and re-linking by reference are not implemented headless:
-setting one is an error, so a design never depends on them silently.
+```
 
 ## autorouting (`inkibox route`)
 

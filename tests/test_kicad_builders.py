@@ -228,3 +228,53 @@ def test_more_than_32_copper_layers_is_refused():
 
     with pytest.raises(ValueError, match="32"):
         Board("p", _Libs(), copper_layers=34)  # type: ignore[arg-type]
+
+
+def test_common_pins_survive_no_connect_cleanup_of_another_unit():
+    from inkibox.kicad import Schematic
+
+    # Given unit 1 driving the common pin 8, unit 2's leftovers marked no-connect
+    sch = Schematic("p", _SymLibs())  # type: ignore[arg-type]
+    a = sch.place("L:A", "U1", (0, 0), unit=1)
+    b = sch.place("L:A", "U1", (20, 0), unit=2)
+    sch.global_label(a.pin("8"), "VCC")
+    sch.global_label(a.pin("1"), "OA")
+    sch.no_connect_unused(b)
+    # When the units join, Then pin 8 keeps its net and pin 7 is no-connect
+    (u1,) = sch.components()
+    assert u1.pins["8"].net == "VCC"
+    assert u1.pins["7"].net.startswith("unconnected-(")
+
+
+def test_unconnected_net_names_follow_kicad():
+    from inkibox.kicad import Schematic
+
+    # Given a two-unit symbol (no unit names: letters) with a slash in a pin name
+    lib = TWO_UNITS.replace('(name "OB")', '(name "SDO/PDM")')
+
+    class Libs:
+        def symbol(self, lib_id):
+            return parse(lib)
+
+    sch = Schematic("p", Libs())  # type: ignore[arg-type]
+    b = sch.place("L:A", "U1", (0, 0), unit=2)
+    sch.no_connect(b.pin("7"))
+    # Then the net is KiCad's: reference + unit letter, '/' escaped
+    assert b.pin("7").net == "unconnected-(U1B-SDO{slash}PDM-Pad7)"
+
+
+def test_unnamed_pin_unconnected_net_has_no_unit_suffix():
+    from inkibox.kicad import Schematic
+
+    # Given a two-unit symbol whose pin 7 has no name
+    lib = TWO_UNITS.replace('(name "OB")', '(name "")')
+
+    class Libs:
+        def symbol(self, lib_id):
+            return parse(lib)
+
+    sch = Schematic("p", Libs())  # type: ignore[arg-type]
+    b = sch.place("L:A", "U1", (0, 0), unit=2)
+    sch.no_connect(b.pin("7"))
+    # Then KiCad's form for an unnamed pin: the bare reference and the pad
+    assert b.pin("7").net == "unconnected-(U1-Pad7)"

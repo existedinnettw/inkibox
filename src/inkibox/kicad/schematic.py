@@ -71,9 +71,19 @@ def _escape_net(text: str) -> str:
     return text.replace("/", "{slash}")
 
 
+def _connected(pin: PlacedPin) -> bool:
+    """On a real net: not open, not marked no-connect."""
+    return pin.net is not None and not pin.net.startswith("unconnected-(")
+
+
 def unconnected_net(pin: PlacedPin) -> str:
-    """KiCad's name for the net of an unconnected pin."""
+    """KiCad's name for the net of an unconnected pin: ``unconnected-(<ref>-<pin>-Pad<n>)``,
+    the reference with the unit suffix of a multi-unit symbol; a pin without a name
+    gives ``unconnected-(<ref>-Pad<n>)``, the reference without it (as kicad-cli's
+    netlist names them, checked in tests/test_e2e_hierarchy.py)."""
     sym = pin.symbol
+    if not pin.name or pin.name == "~":
+        return f"unconnected-({sym.ref}-Pad{pin.number})"
     return f"unconnected-({sym.ref}{_unit_suffix(sym)}-{_escape_net(pin.name)}-Pad{pin.number})"
 
 
@@ -235,14 +245,15 @@ class Schematic:
                 continue
             first = units[0]
             # pins of unit 0 (common to all units) appear in every placed unit: keep the
-            # copy that is connected, and refuse two copies on different nets
+            # copy that is connected (an open or no-connect copy yields to it), and refuse
+            # two copies on different nets
             pins: dict[str, PlacedPin] = {}
             for u in units:
                 for number, pin in u.pins.items():
                     have = pins.get(number)
-                    if have is None or have.net is None:
+                    if have is None or not _connected(have):
                         pins[number] = pin
-                    elif pin.net is not None and pin.net != have.net:
+                    elif _connected(pin) and pin.net != have.net:
                         raise ValueError(
                             f"{first.ref} pin {number}: {have.net} on unit {have.symbol.unit}, "
                             f"{pin.net} on unit {u.unit}"

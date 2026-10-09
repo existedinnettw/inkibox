@@ -248,7 +248,7 @@ class Board:
         self.outline: list[Node] = []
         self.footprints: list[PlacedFootprint] = []
         self.segments: list[tuple[float, float, float, float, float, str, str]] = []
-        self.vias: list[tuple[float, float, float, float, str]] = []
+        self.vias: list[tuple[float, float, float, float, str, tuple[str, str]]] = []
         self.zones: list[Node] = []
         self.texts: list[Node] = []
         self._fp_cache: dict[str, Node] = {}
@@ -734,7 +734,7 @@ class Board:
 
 
 def stackup(
-    layers: list[tuple[str, str, float, dict[str, object]]],
+    layers: list[tuple[str, str, float, dict[str, str | float]]],
     *,
     copper_finish: str = "ENIG",
     impedance_controlled: bool = True,
@@ -751,7 +751,7 @@ def stackup(
         for key in ("material", "epsilon_r", "loss_tangent", "color"):
             if key in extra:
                 val = extra[key]
-                row.append([S(key), val if isinstance(val, str) else num(float(val))])  # type: ignore[arg-type]
+                row.append([S(key), val if isinstance(val, str) else num(val)])
         node.append(row)
     node.append([S("copper_finish"), copper_finish])
     node.append(
