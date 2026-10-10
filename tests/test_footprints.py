@@ -6,8 +6,9 @@ from conftest import R_FOOTPRINT, FakeLibs
 
 from inkibox.kicad.sfile import Node, SFile, format_node, parse
 from inkibox.kicad.sfile import write_text as write_lf
-from inkibox.update.footprints import exchange, place, same_footprint, update_footprints
+from inkibox.update.footprints import exchange, same_footprint, update_footprints
 from inkibox.update.options import FootprintOptions
+from inkibox.update.placement import place
 
 LIB_ID = "Resistor_SMD:R_0603_1608Metric"
 

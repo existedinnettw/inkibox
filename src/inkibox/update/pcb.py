@@ -25,18 +25,11 @@ from pathlib import Path
 
 from ..kicad.sexpr import stable_uuid
 from ..kicad.sfile import Node, SFile, node, string, symbol
-from .footprints import (
-    SCHEMATIC_ATTRS,
-    ExchangeError,
-    _angle,
-    copper_layer_count,
-    exchange,
-    place,
-    ref_of,
-)
+from .footprints import SCHEMATIC_ATTRS, ExchangeError, exchange, ref_of
 from .libcache import LibraryCache, LibraryError
 from .netlist import Component
 from .options import FootprintOptions, PcbOptions
+from .placement import absolute_angle, copper_layer_count, place
 from .report import Report
 
 ATTR_ORDER = (
@@ -123,7 +116,7 @@ def _new_field(
         "property",
         name,
         value,
-        node("at", 0, 0, _angle(float(rot))),
+        node("at", 0, 0, absolute_angle(float(rot))),
         node("unlocked", symbol("yes")),
         node("layer", "B.Fab" if back else "F.Fab"),
         node("hide", symbol("yes")),
