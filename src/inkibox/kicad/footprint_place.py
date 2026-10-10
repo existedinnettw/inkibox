@@ -101,7 +101,7 @@ def flipped(lib: Node, rot: float, at: tuple[float, float], copper: int) -> Node
     """A library footprint as a board stores it on the back: mirrored top to bottom,
     layers swapped, texts mirrored, angles absolute (``inkibox update``'s own flip,
     which matches KiCad's)."""
-    from ..update.footprints import place as place_items
+    from ..update.placement import place as place_items
     from .sexpr import _to_sfile, parse_one
     from .sfile import Node as SNode
     from .sfile import format_node

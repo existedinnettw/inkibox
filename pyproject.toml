@@ -1,6 +1,6 @@
 [project]
     name = "inkibox"
-    version = "0.5.0"
+    version = "0.5.1"
     description = "KiCad toolbox: headless Update Symbols / Update PCB / Update Footprints (inkibox update, inkibox check) and file-based design generation"
     readme = "README.md"
     authors = [{ name = "insleker", email = "bkinnightskytw@gmail.com" }]
