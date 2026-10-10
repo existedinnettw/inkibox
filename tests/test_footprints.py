@@ -377,6 +377,28 @@ def test_library_groups_follow_their_members():
     assert new.child("group").value("uuid") not in _uuids(lib)  # type: ignore[union-attr]
 
 
+def test_library_groups_follow_the_fields_the_board_keeps():
+    """
+    Given a library footprint whose group holds the Reference field and the line
+    When it is exchanged with a board footprint that has its own Reference
+    Then the group lists the board's Reference by its uuid
+    """
+    lib = parse(
+        R_FOOTPRINT.replace(
+            "\t(embedded_fonts no)",
+            '\t(group "g" (uuid "11111111-0000-0000-0000-000000000009")'
+            ' (members "11111111-0000-0000-0000-000000000001"'
+            ' "11111111-0000-0000-0000-000000000003"))\n\t(embedded_fonts no)',
+        )
+    )
+    new = exchange(board_footprint(), lib, LIB_ID, FootprintOptions(), copper=2)
+    members = [a.text for a in new.child("group").child("members").atoms()]  # type: ignore[union-attr]
+    assert members == [
+        "aaaaaaaa-0000-0000-0000-000000000001",  # the board's Reference
+        new.child("fp_line").value("uuid"),  # type: ignore[union-attr]
+    ]
+
+
 def test_update_repairs_uuids_shared_between_footprints(tmp_path):
     """
     Given a board whose two footprints are up to date but share their graphics' uuids

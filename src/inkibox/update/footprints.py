@@ -137,7 +137,7 @@ def exchange(
     out.items.append(existing.child("layer") or node("layer", side))
     out.items += board_children("uuid", "at")
     out.items += lib_children("descr", "tags")
-    out.items += _fields(existing, lib_children("property"), opts)
+    out.items += _fields(existing, lib_children("property"), opts, kept)
     out.items += [p for p in existing.children("property") if not _is_field(p)]
     out.items += board_children(*BOARD_LINKS)
     out.items += [c for c in existing.children() if c.head not in KNOWN]  # (locked yes)
@@ -178,7 +178,7 @@ def _is_field(p: Node) -> bool:
 
 
 def _fields(
-    existing: Node, lib_props: list[Node], opts: FootprintOptions
+    existing: Node, lib_props: list[Node], opts: FootprintOptions, kept: dict[str, str]
 ) -> list[Node]:
     """The library's fields in its order: one the board has keeps the board's place and
     style (and text for Reference and Value, or unless ``text_content``); then the board's
@@ -194,6 +194,7 @@ def _fields(
         if old is None:
             out.append(lp)
             continue
+        _keep_uuid(lp, old, kept)
         if (
             opts.text_content
             and name not in ("Reference", "Value")
