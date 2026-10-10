@@ -295,3 +295,120 @@ def test_pad_nets_go_before_the_pad_overrides():
     pad = next(c for c in new.children("pad") if c.child("zone_connect") is not None)
     heads = [c.head for c in pad.children()]
     assert heads.index("net") < heads.index("pintype") < heads.index("zone_connect")
+
+
+def _uuids(nd: Node) -> list[str]:
+    return [u.atom(0) or "" for u in nd.walk() if u.head == "uuid"]
+
+
+def _board_with(*fps: Node) -> str:
+    body = "\n\t".join(format_node(fp, 1) for fp in fps)
+    return "(kicad_pcb\n\t(version 20260206)\n\t" + body + "\n)\n"
+
+
+def _second(fp: Node, ref: str) -> Node:
+    """Another instance of ``fp``: its own reference and board uuids."""
+    text = format_node(fp).replace("aaaaaaaa-", "cccccccc-")
+    return parse(text.replace('"R1"', f'"{ref}"'))
+
+
+def test_exchanged_footprints_own_their_uuids():
+    """
+    Given two board footprints of one library footprint
+    When both are exchanged
+    Then no uuid is the library's or shared between them (KiCad attributes DRC markers
+    and selections by uuid)
+    """
+    lib = parse(R_FOOTPRINT)
+    one = exchange(board_footprint(), lib, LIB_ID, FootprintOptions(), copper=2)
+    other = _second(board_footprint(), "R2")
+    two = exchange(other, lib, LIB_ID, FootprintOptions(), copper=2)
+    a, b = _uuids(one), _uuids(two)
+    assert len(set(a)) == len(a) and len(set(b)) == len(b)
+    assert not set(a) & set(b)
+    assert not (set(a) | set(b)) & set(_uuids(lib))
+
+
+def test_exchange_is_deterministic():
+    lib = parse(R_FOOTPRINT)
+    first = exchange(board_footprint(), lib, LIB_ID, FootprintOptions(), copper=2)
+    again = exchange(board_footprint(), lib, LIB_ID, FootprintOptions(), copper=2)
+    assert format_node(first) == format_node(again)
+
+
+def test_exchange_keeps_the_uuid_of_an_unchanged_graphic():
+    """
+    Given a board footprint that has the library's graphics under its own uuids
+    When it is exchanged
+    Then the graphics keep the board's uuids
+    """
+    lib = parse(R_FOOTPRINT)
+    up_to_date = exchange(board_footprint(), lib, LIB_ID, FootprintOptions(), copper=2)
+    line = up_to_date.child("fp_line")
+    line.replace_child(
+        line.child("uuid"), parse('(uuid "dddddddd-0000-0000-0000-000000000000")')
+    )  # type: ignore[union-attr]
+    again = exchange(up_to_date, lib, LIB_ID, FootprintOptions(), copper=2)
+    assert (
+        again.child("fp_line").value("uuid") == "dddddddd-0000-0000-0000-000000000000"
+    )  # type: ignore[union-attr]
+
+
+def test_library_groups_follow_their_members():
+    """
+    Given a library footprint with a group of its line and text
+    When it is exchanged
+    Then the group lists the members by their new uuids
+    """
+    lib = parse(
+        R_FOOTPRINT.replace(
+            "\t(embedded_fonts no)",
+            '\t(group "g" (uuid "11111111-0000-0000-0000-000000000009")'
+            ' (members "11111111-0000-0000-0000-000000000003"'
+            ' "11111111-0000-0000-0000-000000000004"))\n\t(embedded_fonts no)',
+        )
+    )
+    new = exchange(board_footprint(), lib, LIB_ID, FootprintOptions(), copper=2)
+    members = [a.text for a in new.child("group").child("members").atoms()]  # type: ignore[union-attr]
+    assert members == [
+        new.child("fp_line").value("uuid"),
+        new.child("fp_text").value("uuid"),
+    ]  # type: ignore[union-attr]
+    assert new.child("group").value("uuid") not in _uuids(lib)  # type: ignore[union-attr]
+
+
+def test_update_repairs_uuids_shared_between_footprints(tmp_path):
+    """
+    Given a board whose two footprints are up to date but share their graphics' uuids
+    (as inkibox 0.5.0 and older left them)
+    When footprints are updated twice
+    Then the first update gives each its own and says so, the second changes nothing
+    """
+    lib = parse(R_FOOTPRINT)
+    one = exchange(board_footprint(), lib, LIB_ID, FootprintOptions(), copper=2)
+    two = exchange(
+        _second(board_footprint(), "R2"),
+        lib,
+        LIB_ID,
+        FootprintOptions(),
+        copper=2,
+    )
+    for fp in (one, two):  # the library's uuids, as the old exchange copied them
+        for head in ("fp_line", "fp_text"):
+            item = fp.child(head)
+            item.replace_child(item.child("uuid"), lib.child(head).child("uuid").copy())  # type: ignore[union-attr]
+    pcb_path = tmp_path / "b.kicad_pcb"
+    write_lf(pcb_path, _board_with(one, two))
+    libs = FakeLibs()
+    first = SFile.load(pcb_path)
+    report = update_footprints(first, libs, FootprintOptions())  # type: ignore[arg-type]
+    assert report.changes == [
+        "R1: uuids shared with other items made unique",
+        "R2: uuids shared with other items made unique",
+    ]
+    first.save()
+    uuids = _uuids(parse(pcb_path.read_text()))
+    assert len(set(uuids)) == len(uuids)
+    second = SFile.load(pcb_path)
+    report = update_footprints(second, libs, FootprintOptions())  # type: ignore[arg-type]
+    assert report.changes == [] and not second.changed()

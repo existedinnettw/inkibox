@@ -65,6 +65,11 @@ are exactly what KiCad would embed, and only the items that change are rewritten
 KiCad's own layout. A design that is up to date is not touched. On designs KiCad itself had
 just updated, all three steps produce byte-identical files.
 
+Every item a footprint takes from its library gets a uuid of that footprint (KiCad tells
+board items apart by uuid, and a library's own uuids would repeat in every copy); an item
+the board already has keeps its own. Footprints whose items share uuids with other items of
+the board (as inkibox 0.5.0 and older left them) get their own on the next update.
+
 Options, with the defaults fixed in `inkibox.update.options` (the safe set: the schematic
 owns footprint assignments, the board owns text placement):
 

@@ -31,6 +31,7 @@ from .netlist import Component
 from .options import FootprintOptions, PcbOptions
 from .placement import absolute_angle, copper_layer_count, place
 from .report import Report
+from .uuids import stamp
 
 ATTR_ORDER = (
     "smd",
@@ -256,6 +257,7 @@ def _add_footprint(
         return None
     items = place(lib_fp, side="F.Cu", rotation=0, copper=copper)
     uid = stable_uuid("footprint", comp.path)
+    stamp(items, uid)
     fp = Node("footprint", [string(comp.footprint)])
     fp.items.append(
         next((i for i in items if i.head == "layer"), node("layer", "F.Cu"))
@@ -263,10 +265,6 @@ def _add_footprint(
     fp.items.append(node("uuid", uid))
     fp.items.append(node("at", spot[0], spot[1]))
     fp.items += [i for i in items if i.head != "layer"]
-    for n, item in enumerate(fp.walk()):
-        u = item.child("uuid") if item is not fp else None
-        if u is not None:
-            item.replace_child(u, node("uuid", stable_uuid(uid, "item", str(n))))
     for n, prop in enumerate(fp.children("property")):
         if prop.atom(0) == "Reference":
             prop.set_atom(1, string(comp.ref))
