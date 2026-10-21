@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .libs import pin_defs, pin_geometry
-from .placed import PlacedSymbol, lib_to_sheet
+from .placed import PlacedSymbol, SheetPin, lib_to_sheet
 from .sexpr import Node, S, atom_text, child, children, clone, head, num, stable_uuid
 
 if TYPE_CHECKING:
@@ -157,6 +157,26 @@ def global_label(
     ]
 
 
+def hierarchical_label(
+    sheet_uuid: str,
+    i: int,
+    name: str,
+    x: float,
+    y: float,
+    angle: int,
+    justify: tuple[str, ...],
+    shape: str,
+) -> Node:
+    return [
+        S("hierarchical_label"),
+        name,
+        [S("shape"), S(shape)],
+        [S("at"), num(x), num(y), angle],
+        effects(FONT, *justify),
+        [S("uuid"), stable_uuid(sheet_uuid, "hier", str(i), name, f"{x},{y}")],
+    ]
+
+
 # --------------------------------------------------------------------------- symbols
 
 
@@ -244,10 +264,30 @@ def symbol(sym: PlacedSymbol, project: str, path: str) -> Node:
     return node
 
 
+SHEET_PIN_ANGLE = {"left": 180, "right": 0, "top": 90, "bottom": 270}
+
+
+def sheet_pin(pin: SheetPin, shape: str) -> Node:
+    return [
+        S("pin"),
+        pin.name,
+        S(shape),
+        [S("at"), num(pin.x), num(pin.y), SHEET_PIN_ANGLE[pin.side]],
+        [S("uuid"), stable_uuid(pin.sheet.sheet_uuid, "pin", pin.name)],
+        effects(FONT, "left" if pin.side in ("left", "top") else "right"),
+    ]
+
+
 def sheet(
-    sub: Schematic, at: Point, size: Point, project: str, path: str, page: str
+    sub: Schematic,
+    at: Point,
+    size: Point,
+    project: str,
+    path: str,
+    page: str,
+    pins: list[Node] | None = None,
 ) -> Node:
-    """The sheet symbol of sub-sheet ``sub`` on its parent (no sheet pins)."""
+    """The sheet symbol of sub-sheet ``sub`` on its parent, with its sheet ``pins``."""
     (x, y), (w, h) = at, size
     return [
         S("sheet"),
@@ -279,6 +319,7 @@ def sheet(
             [S("do_not_autoplace"), S("no")],
             effects(FONT, "left", "top"),
         ],
+        *(pins or []),
         [
             S("instances"),
             [S("project"), project, [S("path"), path, [S("page"), page]]],

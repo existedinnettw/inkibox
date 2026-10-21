@@ -32,6 +32,28 @@ class PlacedPin:
 
 
 @dataclass(slots=True)
+class SheetPin:
+    """A pin on the sheet symbol of sub-sheet ``sheet``, drawn on its parent. The parent
+    connects it like a symbol pin (a label, a global label, a power symbol, or a
+    hierarchical label one level further up); the net it lands on is the net of the
+    sub-sheet's hierarchical labels named ``name``."""
+
+    sheet: Schematic  # the sub-sheet whose symbol carries the pin
+    name: str
+    shape: str | None  # None: the shape of the sub-sheet's label of the same name
+    side: str  # left, right, top, bottom
+    x: float  # parent-sheet coordinates of the connection point
+    y: float
+    dx: int  # outward unit direction (away from the sheet symbol)
+    dy: int
+    net: str | None = None
+
+    @property
+    def pos(self) -> tuple[float, float]:
+        return self.x, self.y
+
+
+@dataclass(slots=True)
 class PlacedSymbol:
     ref: str
     lib_id: str
