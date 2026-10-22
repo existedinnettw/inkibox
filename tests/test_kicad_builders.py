@@ -525,3 +525,143 @@ def test_write_puts_every_sheet_where_output_files_says(tmp_path):
         "b.kicad_sch",
         "p.kicad_sch",
     ]
+
+
+# --------------------------------------------------------------------------- hierarchical labels
+
+
+def test_hierarchical_nets_take_the_name_the_parent_gives_in_any_order():
+    from inkibox.kicad import Schematic
+
+    sch = Schematic("p", _SymLibs())  # type: ignore[arg-type]
+    a = sch.sheet("A", "a.kicad_sch", (10, 10), (20, 20))
+    b = a.sheet("B", "b.kicad_sch", (10, 10), (20, 20))
+    deep = b.place("L:A", "U1", (0, 0), unit=1)
+    mid = a.place("L:A", "U1", (0, 0), unit=2)
+    # Given labels placed bottom up: B's label first, then A's sheet pin and label
+    b.hierarchical_label(deep.pin("1"), "SIG", shape="output")
+    assert deep.pin("1").net == "/A/B/SIG"  # nothing names it yet
+    pin_b = a.sheet_pin(b, "SIG", side="right")
+    a.hierarchical_label(pin_b, "OUT")
+    a.label(mid.pin("7"), "OUT")  # KiCad joins a local label to the hierarchical one
+    assert deep.pin("1").net == mid.pin("7").net == "/A/OUT"
+    # When the root names A's sheet pin with a local label
+    sch.label(sch.sheet_pin(a, "OUT"), "X")
+    # Then the whole net down the hierarchy is /X, as KiCad names it
+    assert deep.pin("1").net == mid.pin("7").net == pin_b.net == "/X"
+    # a global label up top wins the same way
+    a.hierarchical_label(mid.pin("8"), "V")
+    sch.global_label(sch.sheet_pin(a, "V"), "VCC")
+    assert mid.pin("8").net == "VCC"
+    # a local label of a name without a hierarchical label stays local
+    b.label(b.place("L:A", "U2", (0, 0)).pin("1"), "OUT")
+    assert b.symbols[-1].pin("1").net == "/A/B/OUT"
+    assert sch.hierarchy_errors() == []
+
+
+def test_sheet_pins_sit_on_the_sheet_symbol_edges():
+    from inkibox.kicad import Schematic
+
+    sch = Schematic("p", _SymLibs())  # type: ignore[arg-type]
+    a = sch.sheet("A", "a.kicad_sch", (10, 20), (30, 15))
+    left = [sch.sheet_pin(a, n) for n in ("L1", "L2")]
+    assert [p.pos for p in left] == [(10, 22.54), (10, 25.08)]
+    assert (left[0].dx, left[0].dy) == (-1, 0)
+    assert sch.sheet_pin(a, "R", side="right", offset=5).pos == (40, 25)
+    assert sch.sheet_pin(a, "T", side="top", offset=5).pos == (15, 20)
+    bottom = sch.sheet_pin(a, "B", side="bottom", offset=5)
+    assert bottom.pos == (15, 35) and (bottom.dx, bottom.dy) == (0, 1)
+    with pytest.raises(ValueError, match="off the left edge"):
+        sch.sheet_pin(a, "X", offset=15)
+    with pytest.raises(ValueError, match="another pin sits"):
+        sch.sheet_pin(a, "X", offset=2.54)
+    with pytest.raises(ValueError, match="'L1' exists"):
+        sch.sheet_pin(a, "L1", side="right")
+    with pytest.raises(ValueError, match="left, right, top or bottom"):
+        sch.sheet_pin(a, "X", side="up")
+    with pytest.raises(ValueError, match="not a sub-sheet"):
+        a.sheet_pin(a, "X")
+
+
+def test_sheet_pins_are_written_in_the_sheet_symbol():
+    from inkibox.kicad import Schematic
+
+    sch = Schematic("p", _SymLibs())  # type: ignore[arg-type]
+    a = sch.sheet("A", "a.kicad_sch", (10, 20), (30, 15))
+    u = a.place("L:A", "U1", (0, 0))
+    a.hierarchical_label(u.pin("1"), "OUT", shape="output")
+    sch.label(sch.sheet_pin(a, "OUT", side="right"), "X")
+    (label,) = children(a.to_node(), "hierarchical_label")
+    assert (
+        atom_text(label[1]) == "OUT" and atom_text(child(label, "shape")[1]) == "output"
+    )
+    (sheet,) = children(sch.to_node(), "sheet")
+    assert [head(i) for i in sheet[-2:]] == ["pin", "instances"]
+    pin = sheet[-2]
+    # the shape is the label's; a right-side pin points right and is right-justified
+    assert [atom_text(i) for i in pin[1:3]] == ["OUT", "output"]
+    assert child(pin, "at")[1:] == [40, 22.54, 0]
+    assert atom_text(child(child(pin, "effects"), "justify")[1]) == "right"
+
+
+def test_an_inconsistent_hierarchy_is_refused(tmp_path):
+    from inkibox.kicad import Schematic
+
+    sch = Schematic("p", _SymLibs())  # type: ignore[arg-type]
+    a = sch.sheet("A", "a.kicad_sch", (10, 20), (30, 15))
+    u = a.place("L:A", "U1", (0, 0), unit=1)
+    a.hierarchical_label(u.pin("1"), "NOPIN")
+    sch.sheet_pin(a, "NOLABEL")
+    a.hierarchical_label(u.pin("8"), "OPEN")
+    open_pin = sch.sheet_pin(a, "OPEN")
+    assert sch.hierarchy_errors() == [
+        "/A/: hierarchical label 'NOPIN' has no sheet pin",
+        "/A/: sheet pin 'NOLABEL' has no hierarchical label",
+        "/A/: sheet pin 'NOLABEL' is not connected on /",
+        "/A/: sheet pin 'OPEN' is not connected on /",
+    ]
+    with pytest.raises(ValueError, match="'NOPIN' has no sheet pin"):
+        sch.write(tmp_path / "p.kicad_sch")
+    assert list(tmp_path.iterdir()) == []
+    with pytest.raises(TypeError, match="no no-connect"):
+        sch.no_connect(open_pin)
+    with pytest.raises(ValueError, match="root sheet"):
+        sch.hierarchical_label(sch.place("L:A", "U2", (0, 0)).pin("1"), "X")
+    with pytest.raises(ValueError, match="label shape"):
+        a.hierarchical_label(u.pin("8"), "X", shape="in")
+
+
+def test_a_pin_takes_one_connection():
+    """A second connection would leave the net's name to KiCad's priorities (a global
+    label or power symbol over the parent's label), which the builder does not model:
+    refused, whichever comes first."""
+    from inkibox.kicad import Schematic
+
+    sch = Schematic("p", _SymLibs())  # type: ignore[arg-type]
+    a = sch.sheet("A", "a.kicad_sch", (10, 20), (30, 15))
+    u = a.place("L:A", "U1", (0, 0), unit=1)
+    a.hierarchical_label(u.pin("1"), "OUT")
+    with pytest.raises(ValueError, match="U1 pin 1 is connected already"):
+        a.global_label(u.pin("1"), "VCC")
+    a.global_label(u.pin("8"), "VCC")
+    with pytest.raises(ValueError, match="U1 pin 8 is connected already"):
+        a.hierarchical_label(u.pin("8"), "V")
+    pin = sch.sheet_pin(a, "OUT")
+    sch.label(pin, "X")
+    with pytest.raises(ValueError, match="sheet pin 'OUT' of /A/ is connected"):
+        sch.global_label(pin, "G")
+    with pytest.raises(ValueError, match="sheet pin 'OUT' of /A/ is connected"):
+        sch.power_at(pin.pos, "power:+5V", pin_net=pin)
+    with pytest.raises(ValueError, match="no-connect: U1 pin 1 is connected"):
+        a.no_connect(u.pin("1"))
+    v = a.place("L:A", "U2", (0, 0), unit=1)
+    a.no_connect(v.pin("1"))
+    with pytest.raises(ValueError, match="U2 pin 1 is connected already"):
+        a.hierarchical_label(v.pin("1"), "OUT")
+    # a pin is connected on the sheet it is drawn on
+    w = a.place("L:A", "U3", (0, 0), unit=1)
+    with pytest.raises(ValueError, match="U3 pin 1 is on sheet /A/, not on /"):
+        sch.label(w.pin("1"), "X")
+    with pytest.raises(ValueError, match="sheet pin 'IN' is on sheet /, not on /A/"):
+        a.label(sch.sheet_pin(a, "IN"), "X")
+    assert u.pin("1").net == "/X" and u.pin("8").net == "VCC"

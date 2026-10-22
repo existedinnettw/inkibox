@@ -7,11 +7,22 @@ marked no-connect. Connections are made by name. Net names follow KiCad's rules 
 board built from the same object matches what *Update PCB from Schematic* would
 produce: a local label ``X`` is net ``/X`` on the root sheet and ``/<Sheet>/X`` on a
 sub-sheet, a global label and a power symbol are their name, an unconnected pin is
-``unconnected-(<ref>-<pin name>-Pad<number>)``.
+``unconnected-(<ref>-<pin name>-Pad<number>)``. Labels and power symbols of one name on
+a sheet connect whatever their kind, and a net with several names takes the strongest
+(a global label or power symbol over a local label over a hierarchical label, the one
+highest in the hierarchy among equals; :class:`inkibox.kicad.nets.NetGraph`). Each pin
+takes one connection.
 
-A sub-sheet has no sheet pins: nets cross sheets through global labels and power
-symbols. A symbol with several units is placed once per unit (``place(…, unit=n)``),
-on any sheet; :meth:`Schematic.components` joins the units for the board.
+Nets cross sheets through global labels and power symbols, or through a hierarchical
+label on the sub-sheet (:meth:`Schematic.hierarchical_label`) and the sheet pin of the
+same name on its sheet symbol (:meth:`Schematic.sheet_pin`), which the parent connects
+like any pin. Such a net takes the name the parent gives it (``/X`` for a local label
+``X`` on the root sheet); a sheet pin the parent does not connect is refused when the
+schematic is written, as are a hierarchical label without its sheet pin and a sheet pin
+without its label.
+
+A symbol with several units is placed once per unit (``place(…, unit=n)``), on any
+sheet; :meth:`Schematic.components` joins the units for the board.
 """
 
 from __future__ import annotations
@@ -20,13 +31,14 @@ from pathlib import Path
 
 from . import sch_nodes as nodes
 from .libs import Libraries, pin_defs, pin_geometry, unit_pin_defs
+from .nets import GLOBAL, HIER_LABEL, LOCAL_LABEL, NetGraph, unconnected_net
 from .nets import connected as _connected  # noqa: F401 - former home of these names
 from .nets import escape_net as _escape_net
-from .nets import unconnected_net
 from .nets import unit_suffix as _unit_suffix  # noqa: F401
 from .placed import (
     PlacedPin,
     PlacedSymbol,
+    SheetPin,
     join_units,
     lib_to_sheet,
     pin_direction,
@@ -41,6 +53,7 @@ __all__ = [
     "PlacedPin",
     "PlacedSymbol",
     "Schematic",
+    "SheetPin",
     "pin_defs",
     "pin_geometry",
     "unconnected_net",
@@ -52,6 +65,11 @@ __all__ = [
 # no field takes a line break or a tab, a sheet name no "/" (it separates sheets in
 # net names and hierarchy paths); neither may be empty
 FIELD_EXCLUDES = "\r\n\t"
+LABEL_SHAPES = ("input", "output", "bidirectional", "tri_state", "passive")
+SHEET_PIN_STEP = 2.54
+
+# a pin on the sheet, or a pin of a sub-sheet's symbol: what a label connects
+Pin = PlacedPin | SheetPin
 SHEET_NAME_EXCLUDES = FIELD_EXCLUDES + "/"
 
 
@@ -70,6 +88,22 @@ def check_sheet_file(file: str) -> None:
         raise ValueError(
             f"sheet file {file!r}: KiCad refuses an empty file name and line breaks or "
             "tabs in one"
+        )
+
+
+def _check_open(pin: Pin, what: str) -> None:
+    """Refuse a second connection on ``pin``: KiCad would name the net after the
+    stronger of the two (a power symbol or global label over a hierarchical or local
+    label), on the parent sheet too, which one name per pin cannot follow."""
+    if pin.net is not None:
+        owner = (
+            f"sheet pin {pin.name!r} of {pin.sheet.sheet_names}"
+            if isinstance(pin, SheetPin)
+            else f"{pin.symbol.ref} pin {pin.number}"
+        )
+        raise ValueError(
+            f"{what}: {owner} is connected already (net {pin.net}); a pin takes one "
+            "label, power symbol or no-connect"
         )
 
 
@@ -115,6 +149,8 @@ class Schematic:
         self.global_labels: list[
             tuple[str, float, float, int, tuple[str, ...], str]
         ] = []
+        self.hier_labels: list[tuple[str, float, float, int, tuple[str, ...], str]] = []
+        self.sheet_pins: dict[str, SheetPin] = {}  # the pins of this sheet's symbol
         self.symbols: list[PlacedSymbol] = []
         self.lib_symbols: dict[str, Node] = {}
         self.wires: list[tuple[tuple[float, float], tuple[float, float]]] = []
@@ -124,6 +160,7 @@ class Schematic:
         self.texts: list[tuple[str, float, float, float]] = []
         self._power_count = 0
         self._flag_count = 0
+        self._nets = NetGraph()  # used on the root sheet only
 
     @property
     def root(self) -> Schematic:
@@ -140,8 +177,8 @@ class Schematic:
         title: str | None = None,
     ) -> Schematic:
         """A sub-sheet ``name`` stored in ``file`` (next to this sheet's file), drawn as a
-        sheet symbol at ``at``. It has no sheet pins: connect across sheets with
-        :meth:`global_label` and power symbols. Sheet names are unique among a sheet's
+        sheet symbol at ``at`` (its top left corner) of ``size``. Its pins are added with
+        :meth:`sheet_pin`. Sheet names are unique among a sheet's
         sub-sheets, files across the project (a file placed twice would be a shared,
         multi-instance sheet, which this builder does not model)."""
         check_sheet_name(name)
@@ -165,6 +202,64 @@ class Schematic:
         )
         self.sheets.append((sub, at, size))
         return sub
+
+    def sheet_pin(
+        self,
+        sub: Schematic,
+        name: str,
+        *,
+        side: str = "left",
+        offset: float | None = None,
+        shape: str | None = None,
+    ) -> SheetPin:
+        """Pin ``name`` on the ``side`` edge (left, right, top, bottom) of ``sub``'s sheet
+        symbol, ``offset`` from the edge's top or left end (by default one grid step
+        past the side's last pin). It stands for the hierarchical labels ``name`` on
+        ``sub``: connect it here with :meth:`label`, :meth:`global_label`,
+        :meth:`power` or :meth:`hierarchical_label`, and their pins join that net.
+        ``shape`` defaults to the shape of ``sub``'s label."""
+        found = [(at, size) for s, at, size in self.sheets if s is sub]
+        if not found:
+            raise ValueError(
+                f"{sub.sheet_names} is not a sub-sheet of {self.sheet_names}"
+            )
+        if name in sub.sheet_pins:
+            raise ValueError(f"sheet {sub.sheet_names}: a sheet pin {name!r} exists")
+        if shape is not None and shape not in LABEL_SHAPES:
+            raise ValueError(
+                f"sheet pin shape {shape!r}: one of {', '.join(LABEL_SHAPES)}"
+            )
+        (x, y), (w, h) = found[0]
+        try:
+            span, (dx, dy) = {
+                "left": (h, (-1, 0)),
+                "right": (h, (1, 0)),
+                "top": (w, (0, -1)),
+                "bottom": (w, (0, 1)),
+            }[side]
+        except KeyError:
+            raise ValueError(
+                f"sheet pin side {side!r}: left, right, top or bottom"
+            ) from None
+        if offset is None:
+            taken = [
+                p.y - y if dx else p.x - x
+                for p in sub.sheet_pins.values()
+                if p.side == side
+            ]
+            offset = max(taken, default=0.0) + SHEET_PIN_STEP
+        if not 0 < offset < span:
+            raise ValueError(
+                f"sheet pin {name!r}: offset {offset} is off the {side} edge of "
+                f"{sub.sheet_names} (0 to {span}, ends excluded)"
+            )
+        px = {"left": x, "right": x + w}.get(side, x + offset)
+        py = {"top": y, "bottom": y + h}.get(side, y + offset)
+        pin = SheetPin(sub, name, shape, side, num(px), num(py), dx, dy)
+        if any(p.pos == pin.pos for p in sub.sheet_pins.values()):
+            raise ValueError(f"sheet pin {name!r}: another pin sits at {pin.pos}")
+        sub.sheet_pins[name] = pin
+        return pin
 
     def all_sheets(self) -> list[Schematic]:
         """This sheet and every sheet below it, depth first (page order)."""
@@ -261,18 +356,20 @@ class Schematic:
         if a != b:
             self.wires.append(((num(a[0]), num(a[1])), (num(b[0]), num(b[1]))))
 
-    def stub(self, pin: PlacedPin, length: float = 2.54) -> tuple[float, float]:
+    def stub(self, pin: Pin, length: float = 2.54) -> tuple[float, float]:
         """A wire from the pin outward; returns its free end."""
         end = (pin.x + pin.dx * length, pin.y + pin.dy * length)
         self.wire(pin.pos, end)
         return end
 
     def label(
-        self, pin: PlacedPin, name: str, *, stub: float = 2.54, flag: bool = False
+        self, pin: Pin, name: str, *, stub: float = 2.54, flag: bool = False
     ) -> None:
-        """Local label ``name`` on a stub from ``pin``; the pin joins net ``/name``. With
-        ``flag`` a PWR_FLAG shares the label's point (a supply net named by a label, such as
-        the input of a regulator behind a protection diode)."""
+        """Local label ``name`` on a stub from ``pin``; the pin joins net ``/name``, or the
+        stronger name of a net the label meets (KiCad connects the labels and power
+        symbols of one name on a sheet, whatever their kind). With ``flag`` a PWR_FLAG shares the label's point (a supply net
+        named by a label, such as the input of a regulator behind a protection diode)."""
+        self._check_pin(pin, f"label {name!r}")
         end = self.stub(pin, stub) if stub else pin.pos
         angle, justify = {
             (1, 0): (0, ("left", "bottom")),
@@ -281,13 +378,16 @@ class Schematic:
             (0, 1): (270, ("left", "bottom")),
         }[(pin.dx, pin.dy)]
         self.labels.append((name, num(end[0]), num(end[1]), angle, justify))
-        pin.net = f"{self.sheet_names}{_escape_net(name)}"
+        key = ("label", self.sheet_names, name)
+        self._connect(
+            pin, [key], (LOCAL_LABEL, f"{self.sheet_names}{_escape_net(name)}")
+        )
         if flag:
-            self._flag(end, pin.net)
+            self._flag(end, key)
 
     def global_label(
         self,
-        pin: PlacedPin,
+        pin: Pin,
         name: str,
         *,
         stub: float = 2.54,
@@ -297,6 +397,7 @@ class Schematic:
         """Global label ``name`` on a stub from ``pin``; the pin joins net ``name`` on
         every sheet. ``shape`` is KiCad's: input, output, bidirectional, tri_state,
         passive."""
+        self._check_pin(pin, f"global label {name!r}")
         end = self.stub(pin, stub) if stub else pin.pos
         angle, justify = {
             (1, 0): (0, ("left",)),
@@ -307,13 +408,63 @@ class Schematic:
         self.global_labels.append(
             (name, num(end[0]), num(end[1]), angle, justify, shape)
         )
-        pin.net = _escape_net(name)
+        key = ("label", self.sheet_names, name)
+        self._connect(pin, [key, ("global", name)], (GLOBAL, _escape_net(name)))
         if flag:
-            self._flag(end, pin.net)
+            self._flag(end, key)
+
+    def hierarchical_label(
+        self,
+        pin: Pin,
+        name: str,
+        *,
+        stub: float = 2.54,
+        shape: str = "bidirectional",
+    ) -> None:
+        """Hierarchical label ``name`` on a stub from ``pin``, on a sub-sheet: the pin
+        joins the net the parent connects to the sheet pin ``name`` (see
+        :meth:`sheet_pin`), ``/X`` for a local label ``X`` on the root sheet. ``shape`` is
+        KiCad's: input, output, bidirectional, tri_state, passive."""
+        if self.parent is None:
+            raise ValueError(
+                f"hierarchical label {name!r}: the root sheet has no sheet symbol to "
+                "carry it (use a local or global label)"
+            )
+        if shape not in LABEL_SHAPES:
+            raise ValueError(f"label shape {shape!r}: one of {', '.join(LABEL_SHAPES)}")
+        self._check_pin(pin, f"hierarchical label {name!r}")
+        end = self.stub(pin, stub) if stub else pin.pos
+        angle, justify = {
+            (1, 0): (0, ("left",)),
+            (-1, 0): (180, ("right",)),
+            (0, -1): (90, ("left",)),
+            (0, 1): (270, ("right",)),
+        }[(pin.dx, pin.dy)]
+        self.hier_labels.append((name, num(end[0]), num(end[1]), angle, justify, shape))
+        self._connect(
+            pin,
+            [("label", self.sheet_names, name), ("sheet pin", self.sheet_names, name)],
+            (HIER_LABEL, f"{self.sheet_names}{_escape_net(name)}"),
+        )
+
+    def _connect(
+        self, pin: Pin | None, keys: list[tuple], driver: tuple[int, str] | None
+    ) -> None:
+        """Put ``pin`` on the net of ``keys`` (see :class:`NetGraph`), with ``driver``
+        (priority, name) drawn on this sheet among the net's names; a sheet pin also
+        carries the net to its sub-sheet's hierarchical labels."""
+        if isinstance(pin, SheetPin):
+            keys = [*keys, ("sheet pin", pin.sheet.sheet_names, pin.name)]
+        depth = self.sheet_names.count("/") - 1
+        self.root._nets.connect(
+            keys,
+            [] if pin is None else [pin],
+            None if driver is None else (driver[0], depth, driver[1]),
+        )
 
     def power(
         self,
-        pin: PlacedPin,
+        pin: Pin,
         lib_id: str,
         *,
         stub: float = 2.54,
@@ -323,6 +474,7 @@ class Schematic:
         """A power symbol (``power:+5V`` …) with its pin on the free end of a stub from
         ``pin``, upright by default. With ``flag`` a PWR_FLAG shares the point (for nets no
         power_out pin drives)."""
+        self._check_pin(pin, f"power symbol {lib_id}")
         end = self.stub(pin, stub) if stub else pin.pos
         return self.power_at(end, lib_id, rot=rot, pin_net=pin, flag=flag)
 
@@ -332,10 +484,12 @@ class Schematic:
         lib_id: str,
         *,
         rot: int = 0,
-        pin_net: PlacedPin | None = None,
+        pin_net: Pin | None = None,
         flag: bool = False,
     ) -> PlacedSymbol:
         """Place a power symbol whose single pin sits on ``point``."""
+        if pin_net is not None:
+            self._check_pin(pin_net, f"power symbol {lib_id}")
         lib = self.libs.symbol(lib_id)
         pins = pin_defs(lib)
         if len(pins) != 1:
@@ -345,17 +499,33 @@ class Schematic:
         self.root._power_count += 1
         ref = f"#PWR{self.root._power_count:03d}"
         sym = self.place(lib_id, ref, (point[0] - ox, point[1] - oy), rot, in_bom=False)
-        net = sym.value
+        key = ("label", self.sheet_names, sym.value)
         for p in sym.pins.values():
-            p.net = net
+            self._connect(p, [key, ("global", sym.value)], (GLOBAL, sym.value))
         if pin_net is not None:
-            pin_net.net = net
+            self._connect(pin_net, [key], None)
         if flag:
-            self._flag(point, net)
+            self._flag(point, key)
         return sym
 
-    def _flag(self, point: tuple[float, float], net: str) -> None:
-        """A PWR_FLAG with its pin on ``point``, on ``net``."""
+    def _check_pin(self, pin: Pin, what: str) -> None:
+        """Refuse a pin drawn on another sheet (a symbol's pin is on the sheet the
+        symbol is placed on, a sheet pin on its sub-sheet's parent), then a pin that is
+        connected already."""
+        if isinstance(pin, SheetPin):
+            owner, where = pin.sheet.parent, f"sheet pin {pin.name!r}"
+        else:
+            owner, where = pin.symbol.sheet, f"{pin.symbol.ref} pin {pin.number}"
+        if owner is not self:
+            raise ValueError(
+                f"{what}: {where} is on sheet "
+                f"{owner.sheet_names if owner is not None else '?'}, not on "
+                f"{self.sheet_names}"
+            )
+        _check_open(pin, what)
+
+    def _flag(self, point: tuple[float, float], key: tuple) -> PlacedSymbol:
+        """A PWR_FLAG with its pin on ``point``, on the net of ``key``."""
         self.root._flag_count += 1
         flag_sym = self.place(
             "power:PWR_FLAG",
@@ -365,9 +535,16 @@ class Schematic:
             in_bom=False,
         )
         for p in flag_sym.pins.values():
-            p.net = net
+            self._connect(p, [key], None)
+        return flag_sym
 
-    def no_connect(self, pin: PlacedPin) -> None:
+    def no_connect(self, pin: Pin) -> None:
+        if isinstance(pin, SheetPin):
+            raise TypeError(
+                f"sheet pin {pin.name!r} of {pin.sheet.sheet_names}: a sheet pin takes "
+                "no no-connect marker (leave the sub-sheet's label off instead)"
+            )
+        self._check_pin(pin, "no-connect")
         self.no_connects.append(pin.pos)
         pin.net = unconnected_net(pin)
 
@@ -428,6 +605,9 @@ class Schematic:
         out += [
             nodes.global_label(u, i, *gl) for i, gl in enumerate(self.global_labels)
         ]
+        out += [
+            nodes.hierarchical_label(u, i, *hl) for i, hl in enumerate(self.hier_labels)
+        ]
         return out
 
     def _sheet_nodes(self) -> list[Node]:
@@ -435,14 +615,59 @@ class Schematic:
             sh.sheet_uuid: str(i + 1) for i, sh in enumerate(self.root.all_sheets())
         }
         return [
-            nodes.sheet(sub, at, size, self.project, self.path, pages[sub.sheet_uuid])
+            nodes.sheet(
+                sub,
+                at,
+                size,
+                self.project,
+                self.path,
+                pages[sub.sheet_uuid],
+                [
+                    nodes.sheet_pin(pin, pin.shape or sub._label_shape(pin.name))
+                    for pin in sub.sheet_pins.values()
+                ],
+            )
             for sub, at, size in self.sheets
         ]
+
+    def _label_shape(self, name: str) -> str:
+        """The shape of this sheet's first hierarchical label ``name``."""
+        return next(
+            (hl[5] for hl in self.hier_labels if hl[0] == name), "bidirectional"
+        )
+
+    def hierarchy_errors(self) -> list[str]:
+        """What KiCad's ERC would flag in the hierarchy of this sheet and the sheets
+        below it: a hierarchical label without the sheet pin of its name, a sheet pin
+        without its label, a sheet pin the parent leaves unconnected."""
+        out = []
+        for sh in self.all_sheets():
+            labels = {hl[0] for hl in sh.hier_labels}
+            pins = set(sh.sheet_pins)
+            out += [
+                f"{sh.sheet_names}: hierarchical label {n!r} has no sheet pin"
+                for n in sorted(labels - pins)
+            ]
+            out += [
+                f"{sh.sheet_names}: sheet pin {n!r} has no hierarchical label"
+                for n in sorted(pins - labels)
+            ]
+            out += [
+                f"{sh.sheet_names}: sheet pin {n!r} is not connected on "
+                f"{sh.parent.sheet_names if sh.parent else '/'}"
+                for n, p in sh.sheet_pins.items()
+                if p.net is None
+            ]
+        return out
 
     def write(self, path: Path) -> None:
         """Write this sheet to ``path`` and every sub-sheet next to it under its file name.
         Refused, before anything is written, when two sheets would land on one file (a
-        sub-sheet named like the output path, say)."""
+        sub-sheet named like the output path, say) or the hierarchy is inconsistent
+        (:meth:`hierarchy_errors`)."""
+        errors = self.hierarchy_errors()
+        if errors:
+            raise ValueError("; ".join(errors))
         targets = self.output_files(path)
         seen: dict[Path, str] = {}
         for sheet_names, target in targets:

@@ -219,3 +219,156 @@ def test_pcbnew_keeps_the_stackup(tmp_path: Path):
     for name in ("dielectric 1", "dielectric 2", "dielectric 3"):
         assert atom_text(child(rows[name], "material")[1]) == "FR4", name
         assert float(atom_text(child(rows[name], "epsilon_r")[1])) == 4.5, name
+
+
+def test_kicad_names_hierarchical_nets_as_inkibox_does(tmp_path: Path):
+    """
+    Given three sheets joined by hierarchical labels and sheet pins on all four edges, the
+          root naming them with a local label, a global label and a power symbol, a
+          middle sheet naming one with its own label, and a local label of the same name
+          as a hierarchical one
+    When KiCad checks the schematic and the board built from it
+    Then ERC and schematic parity are clean and every pad is on KiCad's net
+    """
+    root = tmp_path / "h"
+    root.mkdir()
+    (root / "h.kicad_pro").write_text("{}")
+    libs = stock_libs(root)
+    g = 2.54
+    sch = Schematic("h", libs, title="h")
+    a = sch.sheet("A", "a.kicad_sch", (50 * g, 20 * g), (20 * g, 15 * g))
+    b = a.sheet("B", "b.kicad_sch", (60 * g, 20 * g), (20 * g, 10 * g))
+
+    def r(sheet: Schematic, ref: str, x: int):
+        return sheet.place(
+            "Device:R", ref, (x * g, 20 * g), value="1k", footprint=R0603
+        )
+
+    r1 = r(sch, "R1", 10)
+    sch.label(r1.pin("1"), "X")
+    sch.power(r1.pin("2"), "power:GND", rot=180)
+    r9 = r(sch, "R9", 20)
+    sch.global_label(r9.pin("1"), "GOUT")
+    sch.power(r9.pin("2"), "power:GND", rot=180)
+    sch.label(sch.sheet_pin(a, "IN", side="left"), "X")
+    sch.global_label(sch.sheet_pin(a, "OUT", side="right"), "GOUT")
+    sch.power(sch.sheet_pin(a, "PWR", side="top"), "power:+5V")
+    sch.label(sch.sheet_pin(a, "BOT", side="bottom"), "X")
+
+    r2 = r(a, "R2", 10)
+    a.hierarchical_label(r2.pin("1"), "IN", shape="input")
+    a.hierarchical_label(r2.pin("2"), "OUT", shape="output")
+    r3 = r(a, "R3", 20)
+    a.label(r3.pin("1"), "IN")  # joins the hierarchical label IN
+    a.hierarchical_label(r3.pin("2"), "PWR", shape="passive")
+    r4 = r(a, "R4", 30)
+    a.label(r4.pin("1"), "LOOP")
+    a.hierarchical_label(r4.pin("2"), "PWR", shape="passive")
+    r6 = r(a, "R6", 40)
+    a.hierarchical_label(r6.pin("1"), "BOT")
+    a.label(r6.pin("2"), "LOOP")
+    a.hierarchical_label(a.sheet_pin(b, "MID", side="left"), "IN", shape="input")
+    a.label(a.sheet_pin(b, "BACK", side="right"), "LOOP")
+
+    r5 = r(b, "R5", 10)
+    b.hierarchical_label(r5.pin("1"), "MID", shape="input")
+    b.hierarchical_label(r5.pin("2"), "BACK")
+    sch.power_at((5 * g, 5 * g), "power:+5V", flag=True)
+    sch.power_at((9 * g, 5 * g), "power:GND", rot=180, flag=True)
+    assert not sch.unconnected()
+    sch.write(root / "h.kicad_sch")
+
+    pcb = Board("h", libs)
+    pcb.root_sheet_uuid = sch.uuid
+    pcb.outline_rect(100, 100, 140, 120)
+    for i, comp in enumerate(sch.components()):
+        pcb.place(comp, (104 + 5 * i, 110), 90)
+    pcb.write(root / "h.kicad_pcb")
+
+    kicad("sch", "erc", "--severity-all", "--format", "json", "-o", "erc.json",
+          "h.kicad_sch", cwd=root)  # fmt: skip
+    erc = json.loads((root / "erc.json").read_text())
+    violations = [v for s in erc["sheets"] for v in s["violations"]]
+    assert violations == [], [v["description"] for v in violations]
+    kicad("pcb", "drc", "--schematic-parity", "--format", "json", "-o", "drc.json",
+          "h.kicad_pcb", cwd=root)  # fmt: skip
+    drc = json.loads((root / "drc.json").read_text())
+    assert drc["schematic_parity"] == [], [
+        v["description"] for v in drc["schematic_parity"]
+    ]
+
+    kicad("sch", "export", "netlist", "-o", "h.net", "h.kicad_sch", cwd=root)
+    netlist = parse_one((root / "h.net").read_text())
+    kicad_nets = {
+        (atom_text(child(n, "ref")[1]), atom_text(child(n, "pin")[1])): atom_text(
+            child(net, "name")[1]
+        )
+        for net in children(child(netlist, "nets"), "net")
+        for n in children(net, "node")
+    }
+    ours = {(fp.ref, p.number): p.net for fp in pcb.footprints for p in fp.all_pads}
+    assert ours == {k: v for k, v in kicad_nets.items() if k in ours}
+    # the root's label names the net all the way down, through A's label of the same name
+    assert {ours[(ref, "1")] for ref in ("R1", "R2", "R3", "R5", "R6")} == {"/X"}
+    assert ours[("R2", "2")] == "GOUT" and ours[("R3", "2")] == "+5V"
+    assert ours[("R5", "2")] == ours[("R4", "1")] == "/A/LOOP"
+
+
+def test_kicad_joins_labels_of_one_name_whatever_their_kind(tmp_path: Path):
+    """
+    Given labels and power symbols of one name on a sheet, of different kinds: a local
+          and a global label, a local label and a power symbol, a hierarchical and a
+          global label below a sheet pin the root names with another global label, and
+          a local label on a sheet without the power symbol of its name
+    When KiCad exports the netlist
+    Then every pin is on the net inkibox gave it: one net per name on a sheet, named
+         after its strongest label, the highest in the hierarchy among equals
+    """
+    root = tmp_path / "j"
+    root.mkdir()
+    (root / "j.kicad_pro").write_text("{}")
+    libs = stock_libs(root)
+    g = 2.54
+    sch = Schematic("j", libs, title="j")
+    a = sch.sheet("A", "a.kicad_sch", (50 * g, 20 * g), (20 * g, 15 * g))
+    refs = iter(range(1, 100))
+
+    def r(sheet: Schematic, first):
+        n = next(refs)
+        res = sheet.place(
+            "Device:R", f"R{n}", (10 * n * g, 20 * g), value="1k", footprint=R0603
+        )
+        first(res.pin("1"))
+        sheet.power(res.pin("2"), "power:GND", rot=180)
+        return res
+
+    q_local = r(sch, lambda p: sch.label(p, "Q"))
+    q_global = r(sch, lambda p: sch.global_label(p, "Q"))
+    v_local = r(sch, lambda p: sch.label(p, "+5V"))
+    v_power = r(sch, lambda p: sch.power(p, "power:+5V"))
+    k_hier = r(a, lambda p: a.hierarchical_label(p, "K"))
+    k_global = r(a, lambda p: a.global_label(p, "K"))
+    sch.global_label(sch.sheet_pin(a, "K"), "G0")
+    g0 = r(sch, lambda p: sch.global_label(p, "G0"))
+    elsewhere = r(a, lambda p: a.label(p, "+5V"))
+    sch.power_at((5 * g, 5 * g), "power:GND", rot=180, flag=True)
+    sch.write(root / "j.kicad_sch")
+
+    kicad("sch", "export", "netlist", "-o", "j.net", "j.kicad_sch", cwd=root)
+    netlist = parse_one((root / "j.net").read_text())
+    kicad_nets = {
+        (atom_text(child(n, "ref")[1]), atom_text(child(n, "pin")[1])): atom_text(
+            child(net, "name")[1]
+        )
+        for net in children(child(netlist, "nets"), "net")
+        for n in children(net, "node")
+    }
+    ours = {
+        (c.ref, number): p.net for c in sch.components() for number, p in c.pins.items()
+    }
+    assert ours == {k: v for k, v in kicad_nets.items() if k in ours}
+    pin1 = lambda sym: sym.pin("1").net
+    assert pin1(q_local) == pin1(q_global) == "Q"
+    assert pin1(v_local) == pin1(v_power) == "+5V"
+    assert pin1(k_hier) == pin1(k_global) == pin1(g0) == "G0"
+    assert pin1(elsewhere) == "/A/+5V"

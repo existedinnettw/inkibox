@@ -53,3 +53,56 @@ def unconnected_net(pin: PlacedPin) -> str:
     if not pin.name or pin.name == "~":
         return f"unconnected-({sym.ref}-Pad{pin.number})"
     return f"unconnected-({sym.ref}{unit_suffix(sym)}-{escape_net(pin.name)}-Pad{pin.number})"
+
+
+# what names a net, weakest first: KiCad's driver priorities (CONNECTION_SUBGRAPH)
+HIER_LABEL, LOCAL_LABEL, GLOBAL = 1, 2, 3
+
+
+class NetGraph:
+    """The pins of a schematic hierarchy grouped into nets, and their names.
+
+    A connection joins keys: a label name on a sheet (``("label", sheet, name)``, which
+    local, hierarchical and global labels and power symbols of that name on the sheet
+    share, as KiCad connects them by name), a global name (``("global", name)``, every
+    global label and power symbol of it) and a sheet pin (``("sheet pin", sheet,
+    name)``, which the parent's connection and the sub-sheet's hierarchical label meet
+    on). Each net is named after its strongest driver, a global label or power symbol
+    over a local label over a hierarchical label, the one highest in the hierarchy among
+    equals; every pin on it is renamed when nets merge."""
+
+    def __init__(self) -> None:
+        self._up: dict[tuple, tuple] = {}
+        self._pins: dict[tuple, list] = {}
+        self._drivers: dict[tuple, list[tuple[int, int, str]]] = {}
+
+    def _find(self, key: tuple) -> tuple:
+        self._up.setdefault(key, key)
+        while (up := self._up[key]) != key:
+            self._up[key] = self._up[up]
+            key = up
+        return key
+
+    def connect(
+        self,
+        keys: list[tuple],
+        pins: list,
+        driver: tuple[int, int, str] | None = None,
+    ) -> None:
+        """Join ``keys`` into one net, put ``pins`` on it, ``driver`` (priority, sheet
+        depth, net name) among its names, and name every pin of it."""
+        root = self._find(keys[0])
+        for key in keys[1:]:
+            other = self._find(key)
+            if other != root:
+                self._up[other] = root
+                self._pins.setdefault(root, []).extend(self._pins.pop(other, []))
+                self._drivers.setdefault(root, []).extend(self._drivers.pop(other, []))
+        self._pins.setdefault(root, []).extend(pins)
+        if driver is not None:
+            self._drivers.setdefault(root, []).append(driver)
+        drivers = self._drivers.get(root)
+        if drivers:
+            name = min(drivers, key=lambda d: (-d[0], d[1], d[2]))[2]
+            for pin in self._pins[root]:
+                pin.net = name

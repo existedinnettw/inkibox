@@ -9,7 +9,7 @@ headless in CI and need no running KiCad; the `kipy` scripts in
 from .board import Board, PlacedFootprint
 from .libs import Libraries
 from .router import GridRouter, RouteResult
-from .schematic import PlacedPin, PlacedSymbol, Schematic
+from .schematic import PlacedPin, PlacedSymbol, Schematic, SheetPin
 
 __all__ = [
     "Board",
@@ -20,4 +20,5 @@ __all__ = [
     "PlacedSymbol",
     "RouteResult",
     "Schematic",
+    "SheetPin",
 ]
