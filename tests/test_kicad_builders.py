@@ -629,3 +629,39 @@ def test_an_inconsistent_hierarchy_is_refused(tmp_path):
         sch.hierarchical_label(sch.place("L:A", "U2", (0, 0)).pin("1"), "X")
     with pytest.raises(ValueError, match="label shape"):
         a.hierarchical_label(u.pin("8"), "X", shape="in")
+
+
+def test_a_pin_takes_one_connection():
+    """A second connection would leave the net's name to KiCad's priorities (a global
+    label or power symbol over the parent's label), which the builder does not model:
+    refused, whichever comes first."""
+    from inkibox.kicad import Schematic
+
+    sch = Schematic("p", _SymLibs())  # type: ignore[arg-type]
+    a = sch.sheet("A", "a.kicad_sch", (10, 20), (30, 15))
+    u = a.place("L:A", "U1", (0, 0), unit=1)
+    a.hierarchical_label(u.pin("1"), "OUT")
+    with pytest.raises(ValueError, match="U1 pin 1 is connected already"):
+        a.global_label(u.pin("1"), "VCC")
+    a.global_label(u.pin("8"), "VCC")
+    with pytest.raises(ValueError, match="U1 pin 8 is connected already"):
+        a.hierarchical_label(u.pin("8"), "V")
+    pin = sch.sheet_pin(a, "OUT")
+    sch.label(pin, "X")
+    with pytest.raises(ValueError, match="sheet pin 'OUT' of /A/ is connected"):
+        sch.global_label(pin, "G")
+    with pytest.raises(ValueError, match="sheet pin 'OUT' of /A/ is connected"):
+        sch.power_at(pin.pos, "power:+5V", pin_net=pin)
+    with pytest.raises(ValueError, match="no-connect: U1 pin 1 is connected"):
+        a.no_connect(u.pin("1"))
+    v = a.place("L:A", "U2", (0, 0), unit=1)
+    a.no_connect(v.pin("1"))
+    with pytest.raises(ValueError, match="U2 pin 1 is connected already"):
+        a.hierarchical_label(v.pin("1"), "OUT")
+    # a pin is connected on the sheet it is drawn on
+    w = a.place("L:A", "U3", (0, 0), unit=1)
+    with pytest.raises(ValueError, match="U3 pin 1 is on sheet /A/, not on /"):
+        sch.label(w.pin("1"), "X")
+    with pytest.raises(ValueError, match="sheet pin 'IN' is on sheet /, not on /A/"):
+        a.label(sch.sheet_pin(a, "IN"), "X")
+    assert u.pin("1").net == "/X" and u.pin("8").net == "VCC"

@@ -87,6 +87,22 @@ def check_sheet_file(file: str) -> None:
         )
 
 
+def _check_open(pin: Pin, what: str) -> None:
+    """Refuse a second connection on ``pin``: KiCad would name the net after the
+    stronger of the two (a power symbol or global label over a hierarchical or local
+    label), on the parent sheet too, which one name per pin cannot follow."""
+    if pin.net is not None:
+        owner = (
+            f"sheet pin {pin.name!r} of {pin.sheet.sheet_names}"
+            if isinstance(pin, SheetPin)
+            else f"{pin.symbol.ref} pin {pin.number}"
+        )
+        raise ValueError(
+            f"{what}: {owner} is connected already (net {pin.net}); a pin takes one "
+            "label, power symbol or no-connect"
+        )
+
+
 class Schematic:
     def __init__(
         self,
@@ -351,6 +367,7 @@ class Schematic:
         a sheet with a hierarchical label ``name``, which KiCad connects to it, that
         label's net). With ``flag`` a PWR_FLAG shares the label's point (a supply net
         named by a label, such as the input of a regulator behind a protection diode)."""
+        self._check_pin(pin, f"label {name!r}")
         end = self.stub(pin, stub) if stub else pin.pos
         angle, justify = {
             (1, 0): (0, ("left", "bottom")),
@@ -378,6 +395,7 @@ class Schematic:
         """Global label ``name`` on a stub from ``pin``; the pin joins net ``name`` on
         every sheet. ``shape`` is KiCad's: input, output, bidirectional, tri_state,
         passive."""
+        self._check_pin(pin, f"global label {name!r}")
         end = self.stub(pin, stub) if stub else pin.pos
         angle, justify = {
             (1, 0): (0, ("left",)),
@@ -412,6 +430,7 @@ class Schematic:
             )
         if shape not in LABEL_SHAPES:
             raise ValueError(f"label shape {shape!r}: one of {', '.join(LABEL_SHAPES)}")
+        self._check_pin(pin, f"hierarchical label {name!r}")
         end = self.stub(pin, stub) if stub else pin.pos
         angle, justify = {
             (1, 0): (0, ("left",)),
@@ -457,6 +476,7 @@ class Schematic:
         """A power symbol (``power:+5V`` …) with its pin on the free end of a stub from
         ``pin``, upright by default. With ``flag`` a PWR_FLAG shares the point (for nets no
         power_out pin drives)."""
+        self._check_pin(pin, f"power symbol {lib_id}")
         end = self.stub(pin, stub) if stub else pin.pos
         return self.power_at(end, lib_id, rot=rot, pin_net=pin, flag=flag)
 
@@ -470,6 +490,8 @@ class Schematic:
         flag: bool = False,
     ) -> PlacedSymbol:
         """Place a power symbol whose single pin sits on ``point``."""
+        if pin_net is not None:
+            self._check_pin(pin_net, f"power symbol {lib_id}")
         lib = self.libs.symbol(lib_id)
         pins = pin_defs(lib)
         if len(pins) != 1:
@@ -487,6 +509,22 @@ class Schematic:
         if flag:
             self._flag(point, net)
         return sym
+
+    def _check_pin(self, pin: Pin, what: str) -> None:
+        """Refuse a pin drawn on another sheet (a symbol's pin is on the sheet the
+        symbol is placed on, a sheet pin on its sub-sheet's parent), then a pin that is
+        connected already."""
+        if isinstance(pin, SheetPin):
+            owner, where = pin.sheet.parent, f"sheet pin {pin.name!r}"
+        else:
+            owner, where = pin.symbol.sheet, f"{pin.symbol.ref} pin {pin.number}"
+        if owner is not self:
+            raise ValueError(
+                f"{what}: {where} is on sheet "
+                f"{owner.sheet_names if owner is not None else '?'}, not on "
+                f"{self.sheet_names}"
+            )
+        _check_open(pin, what)
 
     def _flag(self, point: tuple[float, float], net: str) -> PlacedSymbol:
         """A PWR_FLAG with its pin on ``point``, on ``net``."""
@@ -508,6 +546,7 @@ class Schematic:
                 f"sheet pin {pin.name!r} of {pin.sheet.sheet_names}: a sheet pin takes "
                 "no no-connect marker (leave the sub-sheet's label off instead)"
             )
+        self._check_pin(pin, "no-connect")
         self.no_connects.append(pin.pos)
         pin.net = unconnected_net(pin)
 
