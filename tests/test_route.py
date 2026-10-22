@@ -148,3 +148,62 @@ def test_route_fails_when_connections_are_left_unrouted(tmp_path: Path):
     )
     assert not res.ok
     assert res.unconnected, "KiCad's DRC reports the connection left open"
+
+
+SHUFFLE_DSN = """(pcb x
+  (placement
+    (component R0603
+      (place R1 0 0 front 0 (PN "10K 1%"))
+      (place R2 1 0 front 0)
+      (place R3 2 0 front 0)
+    )
+    (component "SOT-23"
+      (place Q1 0 5 front 90)
+    )
+    (component C0603 (place C1 3 3 front 0))
+  )
+  (network
+    (net A (pins R1-1 R2-1))
+    (net "B (x)" (pins R1-2 Q1-1))
+    (net C (pins R3-1 C1-1))
+    (net D (pins R3-2 C1-2))
+    (class kicad_default A "B (x)" C D (rule (width 200)))
+  )
+)
+"""
+
+
+def test_shuffle_dsn_reorders_by_seed_and_keeps_everything():
+    import re
+
+    from inkibox.route import shuffle_dsn
+
+    tokens = lambda t: sorted(re.findall(r'"[^"]*"|[^\s()]+', t))
+    nets = lambda t: re.findall(r"\(net (\S+)", t)
+    places = lambda t: re.findall(r"\(place (\S+)", t)
+    seen = set()
+    for seed in range(20):
+        out = shuffle_dsn(SHUFFLE_DSN, seed)
+        assert out == shuffle_dsn(SHUFFLE_DSN, seed)  # the same seed, the same order
+        assert tokens(out) == tokens(SHUFFLE_DSN)
+        assert out.count("(") == out.count(")") == SHUFFLE_DSN.count("(")
+        # the class keeps its place after the nets; a place stays in its component
+        assert out.index("(class") > max(out.index(f"(net {n}") for n in nets(out))
+        for comp, refs in (("R0603", {"R1", "R2", "R3"}), ('"SOT-23"', {"Q1"})):
+            body = out[out.index(f"(component {comp}") :].split("(component", 2)[1]
+            assert set(places(body)) & {"R1", "R2", "R3", "Q1", "C1"} == refs
+        seen.add((tuple(nets(out)), tuple(places(out))))
+    assert len(seen) > 10  # seeds give different orders
+    # the sections are found among the root's children, not inside a quoted name
+    named = SHUFFLE_DSN.replace("(pcb x", '(pcb "x (placement (network draft)"', 1)
+    out = shuffle_dsn(named, 1)
+    assert out.startswith('(pcb "x (placement (network draft)"')
+    rest = lambda text: text.split("\n", 1)[1]
+    assert rest(out) == rest(shuffle_dsn(SHUFFLE_DSN, 1))
+
+
+def test_seed_comes_from_pyproject_or_the_command_line(tmp_path: Path):
+    assert load_route_options(tmp_path).seed is None
+    (tmp_path / "pyproject.toml").write_text("[tool.inkibox.route]\nseed = 7\n")
+    assert load_route_options(tmp_path).seed == 7
+    assert load_route_options(tmp_path, seed=3).seed == 3

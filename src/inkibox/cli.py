@@ -3,7 +3,7 @@
     inkibox update [DIR] [--dry-run] [--only symbols,pcb,footprints] [--set sec.opt=bool]…
     inkibox check  [DIR] [--set sec.opt=bool]…
     inkibox options [DIR]
-    inkibox route  [DIR] [--passes N] [--jar FREEROUTING.jar] [--keep DIR]
+    inkibox route  [DIR] [--passes N] [--seed N] [--jar FREEROUTING.jar] [--keep DIR]
 
 ``update`` runs *Update Symbols from Library*, *Update PCB from Schematic* and *Update
 Footprints from Library* in that order; ``check`` verifies the design is up to date, ERC/DRC
@@ -85,7 +85,7 @@ def cmd_options(args: argparse.Namespace) -> int:
 
 def cmd_route(args: argparse.Namespace) -> int:
     project = args.project.resolve()
-    opts = load_route_options(project, passes=args.passes)
+    opts = load_route_options(project, passes=args.passes, seed=args.seed)
     res = route_project(project, opts, jar=args.jar, keep=args.keep)
     print(
         f"freerouting: {res.unrouted if res.unrouted is not None else '?'} unrouted"
@@ -132,6 +132,12 @@ def main(argv: list[str] | None = None) -> int:
         if name == "route":
             p.add_argument(
                 "--passes", type=int, help="Freerouting passes (default 100)"
+            )
+            p.add_argument(
+                "--seed",
+                type=int,
+                help="shuffle the order Freerouting routes in (another seed, another "
+                "try; the same seed, the same tracks)",
             )
             p.add_argument(
                 "--jar", help="a Freerouting jar to use instead of the pinned release"
