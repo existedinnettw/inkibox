@@ -30,6 +30,10 @@ What it does that ``freerouting`` on its own cannot (each was found on real boar
    uuids in a varying order, so the new copper is rewritten with uuids derived from its
    content and in a fixed order: the same board routes to the same bytes. No GUI, API
    server or analytics.
+8. **Another try** (``seed``, off by default). Freerouting has no seed: it routes in the
+   order the DSN lists components and nets, and on a crowded board that order decides
+   what gets through (renaming one net left 1–4 connections unrouted on dvsp_io_diso_b).
+   A seed shuffles that order, reproducibly.
 
 Options come from ``[tool.inkibox.route]`` in ``pyproject.toml``::
 
@@ -37,12 +41,14 @@ Options come from ``[tool.inkibox.route]`` in ``pyproject.toml``::
     passes = 100                  # Freerouting's maximum auto-routing passes
     route_zone_nets = ["GND"]     # connect these with tracks, not through their zones
     clearance_margin = 0.01       # mm added to every clearance while Freerouting routes
+    seed = 3                      # route in a shuffled order (default: KiCad's)
     stitch = { net = "GND", pitch = 2.54, size = 0.6, drill = 0.3 }   # optional
 """
 
 from __future__ import annotations
 
 import json
+import random
 import re
 import subprocess
 import tempfile
@@ -72,6 +78,7 @@ __all__ = [
     "freerouting_score",
     "load_route_options",
     "route_project",
+    "shuffle_dsn",
 ]
 
 
@@ -83,6 +90,7 @@ class RouteOptions:
     clearance_margin: float = 0.0
     stitch: dict | None = None
     freerouting: str = DEFAULT_FREEROUTING
+    seed: int | None = None
 
     _STITCH_KEYS = ("net", "pitch", "size", "drill", "hole_to_hole")
 
@@ -105,6 +113,7 @@ def load_route_options(project_dir: Path, **override) -> RouteOptions:
         "clearance_margin",
         "stitch",
         "freerouting",
+        "seed",
     }
     unknown = set(table) - known
     if unknown:
@@ -172,6 +181,70 @@ def drop_planes(dsn: str, nets: list[str]) -> tuple[str, int]:
                 dsn = dsn[: m.start()] + dsn[end:]
                 removed += 1
     return dsn, removed
+
+
+def _children(text: str, start: int) -> list[tuple[int, int]]:
+    """Spans of the s-expressions directly inside the one opening at ``start``."""
+    out, i, end = [], start + 1, _sexpr_end(text, start) - 1
+    quoted = False
+    while i < end:
+        c = text[i]
+        if quoted:
+            quoted = c != '"'
+        elif c == '"':
+            quoted = True
+        elif c == "(":
+            j = _sexpr_end(text, i)
+            out.append((i, j))
+            i = j
+            continue
+        i += 1
+    return out
+
+
+def _shuffled(text: str, start: int, head: str, rng: random.Random, inner=None) -> str:
+    """The s-expression at ``start`` with its ``(head …)`` children in a random order
+    (each one's own children reordered by ``inner`` first); other children keep their
+    places."""
+    spans = _children(text, start)
+    picked = [k for k, (a, _b) in enumerate(spans) if text.startswith(head, a)]
+    parts = [text[a:b] for a, b in spans]
+    moved = [parts[k] for k in picked]
+    if inner is not None:
+        moved = [inner(m) for m in moved]
+    rng.shuffle(moved)
+    for k, m in zip(picked, moved, strict=True):
+        parts[k] = m
+    out, pos = [], start
+    for (a, b), part in zip(spans, parts, strict=True):
+        out += [text[pos:a], part]
+        pos = b
+    out.append(text[pos : _sexpr_end(text, start)])
+    return "".join(out)
+
+
+def shuffle_dsn(dsn: str, seed: int) -> str:
+    """The DSN with its components, their placements and its nets in an order drawn from
+    ``seed``. Freerouting routes items in the order it reads them, and on a crowded board
+    the order decides what gets through (renaming a net alone can leave connections
+    unrouted); another seed is another try at the same design, the same seed the same
+    tracks."""
+    rng = random.Random(seed)
+    for section, head, inner in (
+        ("placement", "(component ", lambda c: _shuffled(c, 0, "(place ", rng)),
+        ("network", "(net ", None),
+    ):
+        # a section of the root, not that text inside a quoted name
+        found = [
+            (a, b)
+            for a, b in _children(dsn, dsn.index("("))
+            if re.match(r"\(" + section + r"[\s)]", dsn[a:b])
+        ]
+        if not found:
+            continue
+        a, b = found[0]
+        dsn = dsn[:a] + _shuffled(dsn[a:b], 0, head, rng, inner) + dsn[b:]
+    return dsn
 
 
 _SCORE = re.compile(r"\((\d+) unrouted and (\d+) violations\)")
@@ -350,6 +423,11 @@ def _route(
         )
         if r.returncode != 0 or not dsn.is_file():
             raise ProjectError(f"DSN export failed: {_tail(r)}")
+        if opts.seed is not None:
+            dsn.write_text(
+                shuffle_dsn(dsn.read_text(encoding="utf-8"), opts.seed),
+                encoding="utf-8",
+            )
         if opts.route_zone_nets:
             text, removed = drop_planes(
                 dsn.read_text(encoding="utf-8"), opts.route_zone_nets
@@ -368,6 +446,7 @@ def _route(
         ]  # fmt: skip
         echo(
             f"freerouting {jar_path.name}: {opts.passes} passes, {opts.threads} thread(s)"
+            + (f", seed {opts.seed}" if opts.seed is not None else "")
         )
         fr = _run(cmd, cwd=tmp)
         log = fr.stdout + fr.stderr

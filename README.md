@@ -119,6 +119,7 @@ allow_unconnected = true   # DRC passes with unconnected items; every other find
 ```bash
 uv run inkibox route            # route the project's board in place, then DRC it
 uv run inkibox route --keep out # also keep the DSN, SES and Freerouting log in out/
+uv run inkibox route --seed 3   # another try: Freerouting routes in another order
 ```
 
 Routes with [Freerouting](https://github.com/freerouting/freerouting) (GPL-3.0, run as a
@@ -135,6 +136,7 @@ own DRC. Over running `freerouting` by hand it adds what was missing on real boa
 | project files | pcbnew's save rewrites the `.kicad_pro` (reordered DRC exclusions) | restored: only the board changes |
 | verdict | exits 0 with connections left unrouted | Freerouting's final score and KiCad's DRC (unconnected items, errors); exit 1 if either is not clean |
 | reproducibility | KiCad's import gives the new copper random uuids in a varying order | a pinned release (downloaded once, SHA-256 checked), one optimisation thread, uuids from the copper's content in a fixed order: the same board routes to the same bytes |
+| routing order | Freerouting routes in the order the DSN lists components and nets, has no seed, and on a crowded board that order decides what gets through: renaming one net turned a clean route into 1–4 unrouted connections (dvsp_io_diso_b) | `seed` (`--seed N`) shuffles that order reproducibly: another seed is another try, the same seed the same tracks; no seed keeps KiCad's order |
 
 Design rules, net-class widths and clearances, pad shapes and rule areas (keepouts) reach
 Freerouting through KiCad's export. Custom DRC rules (`.kicad_dru`) do not: draw the area
@@ -145,6 +147,7 @@ they protect as a keepout (`inkibox.kicad.Board.keepout`), and DRC still checks 
 passes = 100                 # Freerouting's maximum auto-routing passes (default 100)
 route_zone_nets = ["GND"]    # connect these with tracks, not through their zones
 clearance_margin = 0.01      # mm added to every clearance while Freerouting routes (default 0)
+seed = 3                     # route in a shuffled order (default: KiCad's order)
 stitch = { net = "GND", pitch = 2.54, size = 0.6, drill = 0.3 }  # optional
 ```
 
