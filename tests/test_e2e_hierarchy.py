@@ -312,3 +312,63 @@ def test_kicad_names_hierarchical_nets_as_inkibox_does(tmp_path: Path):
     assert {ours[(ref, "1")] for ref in ("R1", "R2", "R3", "R5", "R6")} == {"/X"}
     assert ours[("R2", "2")] == "GOUT" and ours[("R3", "2")] == "+5V"
     assert ours[("R5", "2")] == ours[("R4", "1")] == "/A/LOOP"
+
+
+def test_kicad_joins_labels_of_one_name_whatever_their_kind(tmp_path: Path):
+    """
+    Given labels and power symbols of one name on a sheet, of different kinds: a local
+          and a global label, a local label and a power symbol, a hierarchical and a
+          global label below a sheet pin the root names with another global label, and
+          a local label on a sheet without the power symbol of its name
+    When KiCad exports the netlist
+    Then every pin is on the net inkibox gave it: one net per name on a sheet, named
+         after its strongest label, the highest in the hierarchy among equals
+    """
+    root = tmp_path / "j"
+    root.mkdir()
+    (root / "j.kicad_pro").write_text("{}")
+    libs = stock_libs(root)
+    g = 2.54
+    sch = Schematic("j", libs, title="j")
+    a = sch.sheet("A", "a.kicad_sch", (50 * g, 20 * g), (20 * g, 15 * g))
+    refs = iter(range(1, 100))
+
+    def r(sheet: Schematic, first):
+        n = next(refs)
+        res = sheet.place(
+            "Device:R", f"R{n}", (10 * n * g, 20 * g), value="1k", footprint=R0603
+        )
+        first(res.pin("1"))
+        sheet.power(res.pin("2"), "power:GND", rot=180)
+        return res
+
+    q_local = r(sch, lambda p: sch.label(p, "Q"))
+    q_global = r(sch, lambda p: sch.global_label(p, "Q"))
+    v_local = r(sch, lambda p: sch.label(p, "+5V"))
+    v_power = r(sch, lambda p: sch.power(p, "power:+5V"))
+    k_hier = r(a, lambda p: a.hierarchical_label(p, "K"))
+    k_global = r(a, lambda p: a.global_label(p, "K"))
+    sch.global_label(sch.sheet_pin(a, "K"), "G0")
+    g0 = r(sch, lambda p: sch.global_label(p, "G0"))
+    elsewhere = r(a, lambda p: a.label(p, "+5V"))
+    sch.power_at((5 * g, 5 * g), "power:GND", rot=180, flag=True)
+    sch.write(root / "j.kicad_sch")
+
+    kicad("sch", "export", "netlist", "-o", "j.net", "j.kicad_sch", cwd=root)
+    netlist = parse_one((root / "j.net").read_text())
+    kicad_nets = {
+        (atom_text(child(n, "ref")[1]), atom_text(child(n, "pin")[1])): atom_text(
+            child(net, "name")[1]
+        )
+        for net in children(child(netlist, "nets"), "net")
+        for n in children(net, "node")
+    }
+    ours = {
+        (c.ref, number): p.net for c in sch.components() for number, p in c.pins.items()
+    }
+    assert ours == {k: v for k, v in kicad_nets.items() if k in ours}
+    pin1 = lambda sym: sym.pin("1").net
+    assert pin1(q_local) == pin1(q_global) == "Q"
+    assert pin1(v_local) == pin1(v_power) == "+5V"
+    assert pin1(k_hier) == pin1(k_global) == pin1(g0) == "G0"
+    assert pin1(elsewhere) == "/A/+5V"
