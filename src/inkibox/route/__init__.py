@@ -148,6 +148,15 @@ class RouteResult:
         return not self.unrouted and not self.unconnected and not self.errors
 
 
+_STRING_QUOTE = re.compile(r"\(string_quote\s+$")
+
+
+def _opens_quote(text: str, i: int) -> bool:
+    """Whether the ``"`` at ``i`` opens a quoted token: not the bare one KiCad's DSN header
+    declares as its quote character, ``(parser (string_quote ") …)``."""
+    return _STRING_QUOTE.search(text, max(0, i - 32), i) is None
+
+
 def _sexpr_end(text: str, start: int) -> int:
     """Index just past the s-expression opening at ``start`` (quotes respected)."""
     depth, i, quoted = 0, start, False
@@ -157,7 +166,7 @@ def _sexpr_end(text: str, start: int) -> int:
             if c == '"':
                 quoted = False
         elif c == '"':
-            quoted = True
+            quoted = _opens_quote(text, i)
         elif c == "(":
             depth += 1
         elif c == ")":
@@ -192,7 +201,7 @@ def _children(text: str, start: int) -> list[tuple[int, int]]:
         if quoted:
             quoted = c != '"'
         elif c == '"':
-            quoted = True
+            quoted = _opens_quote(text, i)
         elif c == "(":
             j = _sexpr_end(text, i)
             out.append((i, j))

@@ -151,6 +151,11 @@ def test_route_fails_when_connections_are_left_unrouted(tmp_path: Path):
 
 
 SHUFFLE_DSN = """(pcb x
+  (parser
+    (string_quote ")
+    (space_in_quoted_tokens on)
+    (host_cad "KiCad's Pcbnew")
+  )
   (placement
     (component R0603
       (place R1 0 0 front 0 (PN "10K 1%"))
