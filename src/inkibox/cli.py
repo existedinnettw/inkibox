@@ -4,12 +4,14 @@
     inkibox check  [DIR] [--set sec.opt=bool]…
     inkibox options [DIR]
     inkibox route  [DIR] [--passes N] [--seed N] [--jar FREEROUTING.jar] [--keep DIR]
+    inkibox place  [DIR] [--time S] [--workers N] [--seed N] [--dry-run]
 
 ``update`` runs *Update Symbols from Library*, *Update PCB from Schematic* and *Update
 Footprints from Library* in that order; ``check`` verifies the design is up to date, ERC/DRC
 clean and unchanged by the sequence; ``options`` prints the effective update options
 (defaults, ``[tool.inkibox.update]`` in ``pyproject.toml``, ``--set``); ``route``
-autoroutes the board with Freerouting (``[tool.inkibox.route]``) and checks it with DRC.
+autoroutes the board with Freerouting (``[tool.inkibox.route]``) and checks it with DRC;
+``place`` packs the footprints with a constraint solver (``[tool.inkibox.place]``).
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ import json
 import sys
 from pathlib import Path
 
+from .place import PlaceError, load_place_options, place_project
 from .route import RouteEnvError, load_route_options, route_project
 from .update import STEPS, ProjectError, update_project
 from .update.check import StepResult, run_check
@@ -108,6 +111,26 @@ def cmd_route(args: argparse.Namespace) -> int:
     return 0 if res.ok else 1
 
 
+def cmd_place(args: argparse.Namespace) -> int:
+    project = args.project.resolve()
+    opts = load_place_options(
+        project, time_limit=args.time, workers=args.workers, seed=args.seed
+    )
+    res = place_project(project, opts, dry_run=args.dry_run)
+    if not res.ok:
+        print(f"place: {res.status}: no placement", file=sys.stderr)
+        return 1
+    assert res.width is not None and res.height is not None
+    print(
+        f"place: {res.status}: {res.width:.2f} x {res.height:.2f} mm = "
+        f"{res.width * res.height:.0f} mm2, ~{res.wire:.0f} mm of wire; "
+        f"{len(res.moved)} moved{' (dry run)' if args.dry_run else ''} -> {res.board.name}"
+    )
+    for m in res.warnings:
+        print(f"warning: {m}", file=sys.stderr)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="inkibox",
@@ -120,6 +143,7 @@ def main(argv: list[str] | None = None) -> int:
         ("check", "up to date, ERC/DRC clean, unchanged"),
         ("options", "print the effective update options"),
         ("route", "autoroute with Freerouting, then check with DRC"),
+        ("place", "pack the footprints tight with a constraint solver"),
     ):
         p = sub.add_parser(name, help=helptext)
         p.add_argument(
@@ -146,6 +170,16 @@ def main(argv: list[str] | None = None) -> int:
                 "--keep", type=Path, help="keep the DSN, SES and Freerouting log here"
             )
             continue
+        if name == "place":
+            p.add_argument(
+                "--time", type=float, help="solver time limit, s (default 30)"
+            )
+            p.add_argument("--workers", type=int, help="solver threads (default 8)")
+            p.add_argument("--seed", type=int, help="solver random seed")
+            p.add_argument(
+                "--dry-run", action="store_true", help="solve and report, write nothing"
+            )
+            continue
         p.add_argument(
             "--set",
             action="append",
@@ -169,8 +203,9 @@ def main(argv: list[str] | None = None) -> int:
             "check": cmd_check,
             "options": cmd_options,
             "route": cmd_route,
+            "place": cmd_place,
         }[args.cmd](args)
-    except (OptionsError, ProjectError, LibraryError, RouteEnvError) as exc:
+    except (OptionsError, ProjectError, LibraryError, RouteEnvError, PlaceError) as exc:
         print(f"inkibox: {exc}", file=sys.stderr)
         return 2
 
