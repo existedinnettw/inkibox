@@ -153,6 +153,51 @@ stitch = { net = "GND", pitch = 2.54, size = 0.6, drill = 0.3 }  # optional
 
 Needs Java 21+ besides KiCad 10. `FREEROUTING_JAR` or `--jar` use another Freerouting build.
 
+## placement (`inkibox place`)
+
+```bash
+uv run inkibox place              # pack the footprints, write positions and outline size
+uv run inkibox place --dry-run    # solve and report only
+uv run inkibox place --time 120   # give the solver longer
+```
+
+Packs a board's front footprints as tight as the rules allow with OR-Tools' CP-SAT, a
+constraint solver, instead of placing them by rule ("this right of that, then snap"): rules
+only nudge one arrangement, while turning a module 90° or laying it down elsewhere is a
+different arrangement only a search reaches. Each footprint is its courtyard at an integer
+position (0.01 mm) in one of its allowed rotations; keep areas (courtyard, `grow`n sides,
+half the `gap`) never overlap; courtyards stay `edge` inside the outline or pass it by the
+part's `overhang`, while pads always stay `pad_edge` inside; `on_grid` parts keep a pad on
+the `grid` (modules on 2.54 mm pin sockets share one perfboard grid); `edges` put a side of a
+part on a side of the board; `fixed` parts stay; `apart` keeps groups a distance from each
+other. It minimises the board's area plus `wire_weight` mm² per mm of estimated wire length
+(each net's half perimeter). The current positions are the starting point: a hand layout to
+beat. The outline must be one `gr_rect` on Edge.Cuts; it keeps its top left corner and gets
+the solved size. Tracks, vias and zones stay as they are: place, then route.
+
+```toml
+[tool.inkibox.place]
+grid = 2.54
+grid_origin = "A1:J2_1"                 # a pad whose current position is a grid point
+on_grid = { A1 = "J2_1", A2 = "J2_1" }  # part -> its pad on the grid
+fixed = ["A1"]
+edges = { A1 = { top = "top" }, A3 = { top = "bottom" } }  # own side -> board side
+grow = { A2 = { top = 0.88 } }          # terminals standing past a module's courtyard
+overhang = { J1 = 6.0, A3 = 8.0 }       # mm the courtyard may pass the edge
+apart = [{ a = ["J2"], b = ["A4"], gap = 2.0 }]
+wire_weight = 0.5                       # mm² of board per mm of wire (default 0.5)
+wire_ignore = ["GND"]
+time_limit = 30                         # s (default 30); workers = 8, seed = 0
+# gap = 0.25, edge = 0.5, pad_edge = 0.5, resolution = 0.05; width / height fix the size
+```
+
+OR-Tools needs protobuf 6 and kicad-python protobuf 5, so it is not a dependency: the solver
+(`inkibox/place/_solver.py`, OR-Tools and the standard library only) runs in-process when
+`ortools` imports, else in an isolated `uv run --with ortools` environment. With several
+workers and a time limit, two runs can return different placements of similar cost. On
+asm-canfd-stepper-b it found a 70.0 × 73.8 mm placement (5 162 mm²) in 60 s, against
+5 770 mm² by hand.
+
 ## file-based generation (`inkibox.kicad`)
 
 Besides the `kipy` scripts that drive a running KiCad, `inkibox.kicad` writes KiCad 10
