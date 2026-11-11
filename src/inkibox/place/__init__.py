@@ -48,6 +48,11 @@ Options come from ``[tool.inkibox.place]`` in ``pyproject.toml``::
     time_limit = 30                    # s
     workers = 8
     seed = 0
+    unit = 0.01                        # mm per solver step (1/n mm)
+
+The solver works in whole ``unit`` steps (0.01 mm); a part on the grid comes back exactly on
+it, rebuilt from the grid line its pad landed on (:func:`exact_positions`), even when its
+pad's offset is no whole number of steps.
 
 The solver runs in-process when ``ortools`` is importable, else in an isolated ``uv run
 --with ortools`` environment (OR-Tools needs protobuf 6, kicad-python protobuf 5). With
@@ -64,6 +69,7 @@ import shutil
 import subprocess
 import tomllib
 from dataclasses import dataclass, field, fields
+from fractions import Fraction
 from pathlib import Path
 
 from ..kicad.geometry import pad_points, rotate, shape_points
@@ -71,7 +77,7 @@ from ..kicad.sfile import Node, SFile, number
 from ..update import ProjectError
 from ..update.placement import _set_angle
 
-UNIT = 100  # problem units per mm
+UNIT = 100  # problem units per mm by default (``unit`` = 0.01 mm)
 SOLVER = Path(__file__).with_name("_solver.py")
 ORTOOLS = "ortools>=9.15"
 SIDES = {"top": (0, -1), "bottom": (0, 1), "left": (-1, 0), "right": (1, 0)}
@@ -83,6 +89,7 @@ __all__ = [
     "PlaceResult",
     "apply_placement",
     "build_problem",
+    "exact_positions",
     "load_place_options",
     "place_project",
     "read_parts",
@@ -116,6 +123,16 @@ class PlaceOptions:
     time_limit: float = 30.0
     workers: int = 8
     seed: int = 0
+    unit: float = 0.01  # mm per solver unit: 1/n mm
+
+    def scale(self) -> int:
+        """Solver units per mm."""
+        n = round(1 / self.unit) if self.unit > 0 else 0
+        if not 1 <= n <= 10000 or abs(n * self.unit - 1) > 1e-9:
+            raise ProjectError(
+                f"[tool.inkibox.place].unit: {self.unit} is not 1/n mm (n = 1 .. 10000)"
+            )
+        return n
 
     def overhang_max(self) -> float:
         return max(self.overhang.values(), default=0.0)
@@ -300,20 +317,40 @@ def _pads_box(pads: list[Pad]) -> tuple[float, float, float, float]:
     )
 
 
-def _u(v: float) -> int:
-    return round(v * UNIT)
+def _u(scale: int, v: float) -> int:
+    return round(v * scale)
 
 
-def _rbox(box, rot) -> list[int]:
-    """``box`` turned by ``rot``, in solver units, rounded outward: a clearance in it is
-    never rounded down (a 0.25 mm gap stays at least 0.25 mm)."""
-    pts = [rotate(x, y, rot) for x in (box[0], box[2]) for y in (box[1], box[3])]
+def _err(scale: int, v: float) -> float:
+    """``v`` mm less ``v`` rounded to whole units, in mm."""
+    return v - round(v * scale) / scale
+
+
+def _up(scale: int, v: float) -> int:
+    """A minimum distance in units, rounded up: never weaker than asked."""
+    return math.ceil(v * scale - 1e-6)
+
+
+def _down(scale: int, v: float) -> int:
+    """An allowance in units, rounded down: never more than granted."""
+    return math.floor(v * scale + 1e-6)
+
+
+def _rbox(scale: int, box, rot, shift: tuple[float, float] = (0.0, 0.0)) -> list[int]:
+    """``box`` turned by ``rot`` and moved by ``shift`` (mm), in solver units, rounded
+    outward: a clearance in it is never rounded down (a 0.25 mm gap stays 0.25 mm)."""
+    pts = [
+        (px + shift[0], py + shift[1])
+        for px, py in (
+            rotate(x, y, rot) for x in (box[0], box[2]) for y in (box[1], box[3])
+        )
+    ]
     eps = 1e-6  # float noise of an exact value, e.g. 0.1 * 100
     return [
-        math.floor(min(p[0] for p in pts) * UNIT + eps),
-        math.floor(min(p[1] for p in pts) * UNIT + eps),
-        math.ceil(max(p[0] for p in pts) * UNIT - eps),
-        math.ceil(max(p[1] for p in pts) * UNIT - eps),
+        math.floor(min(p[0] for p in pts) * scale + eps),
+        math.floor(min(p[1] for p in pts) * scale + eps),
+        math.ceil(max(p[0] for p in pts) * scale - eps),
+        math.ceil(max(p[1] for p in pts) * scale - eps),
     ]
 
 
@@ -331,6 +368,12 @@ def build_problem(
     """The JSON problem :mod:`._solver` reads, positions relative to ``origin`` (the
     outline's top left corner); ``size`` fixes the board's width / height (``None``:
     solve for it)."""
+    sc = opts.scale()
+    if opts.wire_weight < 0:
+        raise ProjectError("[tool.inkibox.place].wire_weight: must not be negative")
+    wire = Fraction(opts.wire_weight * sc).limit_denominator(1000)
+    if opts.wire_weight > 0 and wire == 0:
+        wire = Fraction(1, 1000)
     refs = {p.ref: i for i, p in enumerate(parts)}
     dup = {p.ref for p in parts if sum(q.ref == p.ref for q in parts) > 1}
     named = [
@@ -353,6 +396,8 @@ def build_problem(
                 f"[tool.inkibox.place].{key}: {ref} names more than one footprint"
             )
     grid = None
+    grid_mm = None
+    origin_err = (0.0, 0.0)
     if opts.grid:
         if not opts.grid_origin or ":" not in opts.grid_origin:
             raise ProjectError(
@@ -363,12 +408,20 @@ def build_problem(
             raise ProjectError(f"[tool.inkibox.place].grid_origin: no footprint {gref}")
         g = parts[refs[gref]]
         gx, gy = rotate(g.pad(gpad).x, g.pad(gpad).y, g.rot)
-        pitch = _u(opts.grid)
+        pitch = _u(sc, opts.grid)
+        if pitch < 1 or abs(opts.grid * sc - pitch) > 1e-6:
+            raise ProjectError(
+                f"[tool.inkibox.place]: grid {opts.grid} mm is no whole number of "
+                f"unit {opts.unit} mm steps: use a finer unit"
+            )
         grid = {
             "pitch": pitch,
-            "ox": _u(g.x + gx - origin[0]) % pitch,
-            "oy": _u(g.y + gy - origin[1]) % pitch,
+            "ox": _u(sc, g.x + gx - origin[0]) % pitch,
+            "oy": _u(sc, g.y + gy - origin[1]) % pitch,
         }
+        # the same in exact mm, for :func:`exact_positions`
+        grid_mm = [opts.grid, g.x + gx - origin[0], g.y + gy - origin[1]]
+        origin_err = (_err(sc, grid_mm[1]), _err(sc, grid_mm[2]))
     # one pin per part and net: the middle of that part's pads on the net
     nets: dict[str, list[int]] = {}
     members: dict[str, dict[int, tuple[float, float]]] = {}
@@ -390,8 +443,8 @@ def build_problem(
         if len(mem) > 1:
             nets[net] = sorted(mem)
     out_parts = []
-    extent = 0.0
-    far = 0.0
+    extent = 0  # in units, from the rounded geometry the solver sees
+    far = 0
     for i, part in enumerate(parts):
         fixed = part.back or part.ref in opts.fixed
         rots = (
@@ -419,39 +472,52 @@ def build_problem(
             pbox = _union(pbox, part.cut)
         on_grid = part.ref in opts.on_grid and grid is not None
         options = []
+        boxes: list[list[int]] = []  # every rounded box of every option
         for r in rots:
+            # where the part will really stand, off the solver's position: a fixed part by
+            # its position's rounding, a grid part (exact_positions) by the rounding of the
+            # grid origin less that of its grid pad's offset (known per rotation and axis)
+            shift = (0.0, 0.0)
+            if fixed:  # it stays exactly where it is, not at its position in units
+                shift = (_err(sc, part.x - origin[0]), _err(sc, part.y - origin[1]))
+            elif on_grid:
+                gp = part.pad(opts.on_grid[part.ref])
+                gx, gy = rotate(gp.x, gp.y, r)
+                shift = (origin_err[0] - _err(sc, gx), origin_err[1] - _err(sc, gy))
+            ob, ok, op = (_rbox(sc, b, r, shift) for b in (part.box, kbox, pbox))
+            boxes += [ob, ok, op]
             o = {
                 "rot": r,
-                "box": _rbox(part.box, r),
-                "keep": _rbox(kbox, r),
-                "pads": _rbox(pbox, r),
+                "box": ob,
+                "keep": ok,
+                "pads": op,
+                "shift_mm": list(shift),  # for exact_positions; the solver ignores it
             }
             if on_grid:
                 gp = part.pad(opts.on_grid[part.ref])
                 gx, gy = rotate(gp.x, gp.y, r)
-                o["grid"] = [_u(gx), _u(gy)]
+                o["grid"] = [_u(sc, gx), _u(sc, gy)]
+                o["grid_mm"] = [gx, gy]  # exact; the solver ignores it
             o["pins"] = {
-                net: [_u(c) for c in rotate(*members[net][i], r)]
+                net: [_u(sc, c) for c in rotate(*members[net][i], r)]
                 for net in nets
                 if i in members[net]
             }
             options.append(o)
-        extent += max(kbox[2] - kbox[0], kbox[3] - kbox[1])
+        extent += max(max(b[2] - b[0], b[3] - b[1]) for b in boxes)
         # a part's current place must lie inside the bound, a fixed one above all
-        reach = max(abs(part.x - origin[0]), abs(part.y - origin[1])) + max(
-            abs(v) for v in kbox
-        )
-        far = max(far, reach)
+        reach = max(abs(_u(sc, part.x - origin[0])), abs(_u(sc, part.y - origin[1])))
+        far = max(far, reach + max(abs(v) for b in boxes for v in b))
         out_parts.append(
             {
                 "ref": part.ref,
                 "fixed": fixed,
                 "hint": [
-                    _u(part.x - origin[0]),
-                    _u(part.y - origin[1]),
+                    _u(sc, part.x - origin[0]),
+                    _u(sc, part.y - origin[1]),
                     part.rot % 360 if fixed else round(part.rot) % 360,
                 ],
-                "overhang": _u(opts.overhang.get(part.ref, 0.0)),
+                "overhang": _down(sc, opts.overhang.get(part.ref, 0.0)),
                 "touch": [want[s] for s in want],
                 "on_grid": on_grid,
                 "options": options,
@@ -464,37 +530,50 @@ def build_problem(
                 {
                     "a": [refs[r] for r in rule["a"]],
                     "b": [refs[r] for r in rule["b"]],
-                    "gap": _u(rule["gap"]),
+                    "gap": _up(sc, rule["gap"]),
                 }
             )
         except KeyError as exc:
             raise ProjectError(f"[tool.inkibox.place].apart: {exc}") from exc
     w = opts.width if opts.width is not None else size[0]
     h = opts.height if opts.height is not None else size[1]
+    for name, v in (("width", w), ("height", h)):
+        if v is not None and abs(v * sc - round(v * sc)) > 1e-6:
+            raise ProjectError(
+                f"[tool.inkibox.place]: {name} {v} mm is no whole number of unit "
+                f"{opts.unit} mm steps"
+            )
     return {
         "parts": out_parts,
-        "bound": _u(
-            2 * (extent + far)
-            + (w or 0)
-            + (h or 0)
-            + opts.overhang_max()
-            + 2 * (opts.edge + opts.pad_edge)
-            # every apart rule's gap between every pair it names, as if in one row
-            + sum(r["gap"] * len(r["a"]) * len(r["b"]) for r in opts.apart)
-            # each part may need up to a lattice step to land on its grid / resolution
-            + 2 * len(parts) * ((opts.grid or 0) + opts.resolution)
-        ),
+        # every length in units, as the solver will see it
+        "bound": 2 * (extent + far)
+        + (0 if w is None else _u(sc, w))
+        + (0 if h is None else _u(sc, h))
+        + _up(sc, opts.overhang_max())
+        + 2 * (_up(sc, opts.edge) + _up(sc, opts.pad_edge))
+        # every apart rule's gap between every pair it names, as if in one row
+        + sum(_up(sc, r["gap"]) * len(r["a"]) * len(r["b"]) for r in opts.apart)
+        # each part may need up to a lattice step to land on its grid / resolution
+        + 2
+        * len(parts)
+        * ((grid["pitch"] if grid else 0) + max(1, _u(sc, opts.resolution))),
         "board": {
-            "edge": _u(opts.edge),
-            "pad_edge": _u(opts.pad_edge),
-            "width": None if w is None else _u(w),
-            "height": None if h is None else _u(h),
+            "edge": _up(sc, opts.edge),
+            "pad_edge": _up(sc, opts.pad_edge),
+            "width": None if w is None else _u(sc, w),
+            "height": None if h is None else _u(sc, h),
         },
         "grid": grid,
-        "res": max(1, _u(opts.resolution)),
+        "res": max(1, _u(sc, opts.resolution)),
         "apart": apart,
         "nets": nets,
-        "wire_coef": round(opts.wire_weight * UNIT),
+        # wire_weight mm2 of board per mm of wire, as a ratio of integers: area_coef x
+        # area (units2) + wire_coef x wire (units); a weight that rounds to 0 at a coarse
+        # unit keeps its share
+        "wire_coef": wire.numerator,
+        "area_coef": wire.denominator,
+        "scale": sc,
+        "grid_mm": grid_mm,
         "time": opts.time_limit,
         "workers": opts.workers,
         "seed": opts.seed,
@@ -506,7 +585,7 @@ def run_solver(problem: dict) -> dict:
     if importlib.util.find_spec("ortools") is not None:
         from ._solver import solve
 
-        return solve(problem)
+        return {**solve(problem), "scale": problem.get("scale", UNIT)}
     uv = shutil.which("uv")
     if uv is None:
         raise PlaceError(
@@ -531,7 +610,7 @@ def run_solver(problem: dict) -> dict:
     )
     if r.returncode != 0:
         raise PlaceError(f"solver failed: {r.stderr.strip()[-2000:]}")
-    return json.loads(r.stdout)
+    return {**json.loads(r.stdout), "scale": problem.get("scale", UNIT)}
 
 
 # --------------------------------------------------------------------------- write back
@@ -561,6 +640,21 @@ def _move(part: Part, x: float, y: float, rot: float) -> None:
     part.x, part.y, part.rot = x, y, rot
 
 
+def exact_positions(problem: dict, result: dict) -> list[tuple[float, float, float]]:
+    """The solved positions in mm from the outline's corner, a grid part's exact. The
+    solver keeps its pad on the grid with the grid origin and the pad's offset rounded to
+    its unit (10.565 mm is no whole number of 0.01 mm), so the exact position is the
+    solved one plus the difference of those roundings: the very shift :func:`build_problem`
+    gave the part's boxes, so the solver judged it where it stands."""
+    scale = problem["scale"]
+    out = []
+    for part, (ux, uy, rot) in zip(problem["parts"], result["parts"], strict=True):
+        opt = next(o for o in part["options"] if o["rot"] == rot)
+        dx, dy = opt.get("shift_mm", (0.0, 0.0))
+        out.append((ux / scale + dx, uy / scale + dy, rot))
+    return out
+
+
 def apply_placement(
     sf: SFile,
     parts: list[Part],
@@ -569,16 +663,21 @@ def apply_placement(
     *,
     resize: bool,
     fixed: frozenset[int] = frozenset(),
+    positions: list[tuple[float, float, float]] | None = None,
 ) -> list[str]:
     """Write the solved positions (``result["parts"]``: one per part, in order) and, with
     ``resize``, the outline's size; the refs that moved. ``fixed`` (indices into
-    ``parts``) are never written: the solver sees them in its units (0.01 mm), the board
-    keeps them exactly."""
+    ``parts``) are never written: the solver sees them in its units, the board keeps them
+    exactly. ``positions`` (mm from ``origin``, :func:`exact_positions`) replace the
+    solver's rounded ones."""
     moved = []
-    for i, (part, (ux, uy, rot)) in enumerate(zip(parts, result["parts"], strict=True)):
+    scale = result.get("scale", UNIT)
+    if positions is None:
+        positions = [(ux / scale, uy / scale, rot) for ux, uy, rot in result["parts"]]
+    for i, (part, (px, py, rot)) in enumerate(zip(parts, positions, strict=True)):
         if i in fixed:
             continue
-        x, y = origin[0] + ux / UNIT, origin[1] + uy / UNIT
+        x, y = origin[0] + px, origin[1] + py
         if abs(x - part.x) > 1e-6 or abs(y - part.y) > 1e-6 or (rot - part.rot) % 360:
             _move(part, x, y, rot)
             moved.append(part.ref)
@@ -590,8 +689,8 @@ def apply_placement(
         assert s is not None and e is not None
         s.set_atom(0, number(origin[0]))
         s.set_atom(1, number(origin[1]))
-        e.set_atom(0, number(round(origin[0] + result["width"] / UNIT, 6)))
-        e.set_atom(1, number(round(origin[1] + result["height"] / UNIT, 6)))
+        e.set_atom(0, number(round(origin[0] + result["width"] / scale, 6)))
+        e.set_atom(1, number(round(origin[1] + result["height"] / scale, 6)))
     return moved
 
 
@@ -641,8 +740,9 @@ def place_project(
     res = PlaceResult(boards[0], result["status"], warnings=warnings)
     if not res.ok:
         return res
-    res.width, res.height = result["width"] / UNIT, result["height"] / UNIT
-    res.wire = result["wire"] / UNIT
+    scale = problem["scale"]
+    res.width, res.height = result["width"] / scale, result["height"] / scale
+    res.wire = result["wire"] / scale
     res.moved = apply_placement(
         sf,
         parts,
@@ -650,6 +750,7 @@ def place_project(
         result,
         resize=True,
         fixed=frozenset(i for i, p in enumerate(problem["parts"]) if p["fixed"]),
+        positions=exact_positions(problem, result),
     )
     routed = len(sf.root.children("segment")) + len(sf.root.children("via"))
     if routed and res.moved:

@@ -189,6 +189,7 @@ wire_weight = 0.5                       # mm² of board per mm of wire (default 
 wire_ignore = ["GND"]
 time_limit = 30                         # s (default 30); workers = 8, seed = 0
 # gap = 0.25, edge = 0.5, pad_edge = 0.5, resolution = 0.05; width / height fix the size
+# unit = 0.01                           # mm per solver step (1/n mm); grid parts come back exact
 ```
 
 OR-Tools needs protobuf 6 and kicad-python protobuf 5, so it is not a dependency: the solver
