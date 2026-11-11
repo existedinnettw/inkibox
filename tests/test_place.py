@@ -17,6 +17,7 @@ from inkibox.place import (
     _rbox,
     apply_placement,
     build_problem,
+    exact_positions,
     load_place_options,
     place_project,
     read_parts,
@@ -365,8 +366,8 @@ def test_a_footprints_own_edge_cuts_count_as_its_area_and_its_copper(tmp_path: P
 
 
 def test_boxes_round_outward_so_no_clearance_shrinks():
-    assert _rbox((-5.125, -1.005, 5.125, 1.005), 0) == [-513, -101, 513, 101]
-    assert _rbox((-0.1, 0, 0.3, 0.7), 0) == [-10, 0, 30, 70]  # exact values stay
+    assert _rbox(100, (-5.125, -1.005, 5.125, 1.005), 0) == [-513, -101, 513, 101]
+    assert _rbox(100, (-0.1, 0, 0.3, 0.7), 0) == [-10, 0, 30, 70]  # exact values stay
 
 
 @solver
@@ -424,3 +425,277 @@ def test_a_fixed_back_part_does_not_pin_a_front_part_of_the_same_reference(
     moved = apply_placement(sf, parts, (0, 0), result, resize=False, fixed=fixed)
     assert moved == ["U1"] and (parts[1].x, parts[1].y) == (30, 30)
     assert (parts[0].x, parts[0].y) == (10, 10)
+
+
+def _module(ref: str) -> Part:
+    """A module whose grid pad sits at a 0.005 mm offset (dvsp_is2062a_b's J2_1 is 10.565
+    mm off its origin), which no whole number of 0.01 mm units reaches."""
+    return Part(
+        ref,
+        Node("footprint"),
+        0.0,
+        0.0,
+        0.0,
+        False,
+        (-20.0, -12.785, 20.0, 12.785),
+        [Pad("1", -16.38, 10.565, (-17.23, 9.715, -15.53, 11.415), None)],
+    )
+
+
+@solver
+def test_grid_parts_come_back_exactly_on_the_grid():
+    parts = [_square("G", 2, 2), _module("M")]
+    parts[0].x = parts[0].y = 2.02  # its pad 1 (at its origin) sets the grid
+    opts = PlaceOptions(
+        grid=2.54,
+        grid_origin="G:1",
+        on_grid={"M": "1"},
+        fixed=["G"],
+        time_limit=20,
+        workers=1,
+    )
+    problem = build_problem(parts, (0, 0), (None, None), opts)
+    result = run_solver(problem)
+    assert result["status"] in ("OPTIMAL", "FEASIBLE")
+    from inkibox.kicad.geometry import rotate
+
+    x, y, rot = exact_positions(problem, result)[1]
+    px, py = rotate(-16.38, 10.565, rot)
+    for v in (x + px, y + py):
+        k = (v - 2.02) / 2.54
+        assert abs(k - round(k)) < 1e-9  # exactly; the solver's own value is 0.005 off
+
+
+def test_the_unit_is_one_nth_of_a_mm(tmp_path: Path):
+    parts, _ = read_parts(SFile.load(_board(tmp_path)))
+    problem = build_problem(parts, (0, 0), (None, None), PlaceOptions(unit=0.001))
+    assert problem["scale"] == 1000
+    assert problem["parts"][0]["options"][0]["box"] == [-3000, -1000, 3000, 1000]
+    assert (problem["wire_coef"], problem["area_coef"]) == (500, 1)  # 0.5 mm2 per mm
+    with pytest.raises(ProjectError, match="unit"):
+        build_problem(parts, (0, 0), (None, None), PlaceOptions(unit=0.003))
+
+
+@solver
+def test_a_finer_unit_solves_to_the_same_board(tmp_path: Path):
+    parts = [_square("A", 10, 10), _square("B", 10, 10), _square("C", 20, 10)]
+    opts = PlaceOptions(
+        gap=0,
+        edge=0,
+        pad_edge=0,
+        resolution=0.01,
+        wire_weight=0,
+        unit=0.001,
+        time_limit=20,
+        workers=1,
+    )
+    res = run_solver(build_problem(parts, (0, 0), (None, None), opts))
+    assert res["status"] == "OPTIMAL" and res["scale"] == 1000
+    assert res["width"] * res["height"] == 20000 * 20000
+
+
+@solver
+def test_the_exact_shift_never_takes_a_part_past_the_edge_or_into_another():
+    # a pad 0.005 mm off its origin on a 1 mm grid, courtyards on whole units, no margins
+    g = _square("G", 2, 2)
+    g.x = g.y = 1.0
+    m = Part(
+        "M",
+        Node("footprint"),
+        5.0,
+        1.0,
+        0.0,
+        False,
+        (-1.0, -1.0, 1.0, 1.0),
+        [Pad("1", 0.005, 0.0, (-0.495, -0.5, 0.505, 0.5), None)],
+    )
+    opts = PlaceOptions(
+        gap=0,
+        edge=0,
+        pad_edge=0,
+        resolution=0.01,
+        grid=1.0,
+        grid_origin="G:1",
+        on_grid={"M": "1"},
+        fixed=["G"],
+        wire_weight=0,
+        time_limit=20,
+        workers=1,
+    )
+    problem = build_problem([g, m], (0, 0), (None, None), opts)
+    result = run_solver(problem)
+    assert result["status"] == "OPTIMAL"
+    w, h = result["width"] / 100, result["height"] / 100
+    (gx, gy, _), (x, y, rot) = exact_positions(problem, result)
+    assert rot % 180 == 0
+    box = (x - 1, y - 1, x + 1, y + 1)
+    assert (
+        box[0] >= -1e-9
+        and box[1] >= -1e-9
+        and box[2] <= w + 1e-9
+        and box[3] <= h + 1e-9
+    )
+    gbox = (gx - 1, gy - 1, gx + 1, gy + 1)
+    apart = (
+        box[0] >= gbox[2] - 1e-9
+        or gbox[0] >= box[2] - 1e-9
+        or (box[1] >= gbox[3] - 1e-9 or gbox[1] >= box[3] - 1e-9)
+    )
+    assert apart
+
+
+def test_the_grid_must_be_a_whole_number_of_units(tmp_path: Path):
+    parts, _ = read_parts(SFile.load(_board(tmp_path)))
+    for unit, grid in ((1.0, 0.5), (0.1, 2.54)):
+        opts = PlaceOptions(unit=unit, grid=grid, grid_origin="U1:1")
+        with pytest.raises(ProjectError, match="finer unit"):
+            build_problem(parts, (0, 0), (None, None), opts)
+
+
+@solver
+def test_the_correction_keeps_an_edge_part_on_its_edge():
+    # the pad offset rounds in y only: the part must still reach the left edge
+    g = _square("G", 2, 2)
+    g.x = g.y = 3.0  # its pad 1 at (3, 3): a 1 mm grid through (0, 0)
+    m = Part(
+        "M",
+        Node("footprint"),
+        10.0,
+        10.0,
+        0.0,
+        False,
+        (-1.0, -1.0, 1.0, 1.0),
+        [Pad("1", 0.0, 0.005, (-0.5, -0.495, 0.5, 0.505), None)],
+    )
+    opts = PlaceOptions(
+        gap=0,
+        edge=0,
+        pad_edge=0,
+        resolution=0.01,
+        grid=1.0,
+        grid_origin="G:1",
+        on_grid={"M": "1"},
+        fixed=["G"],
+        rotations={"M": [0]},
+        edges={"M": {"left": "left"}},
+        wire_weight=0,
+        time_limit=20,
+        workers=1,
+    )
+    problem = build_problem([g, m], (0, 0), (None, None), opts)
+    result = run_solver(problem)
+    assert result["status"] == "OPTIMAL"
+    x, y, _ = exact_positions(problem, result)[1]
+    assert x == pytest.approx(1.0)  # its courtyard on the left edge
+    k = y + 0.005 - 3.0  # its pad on the grid, exactly
+    assert abs(k - round(k)) < 1e-9
+
+
+def test_clearances_round_up_and_allowances_down_at_a_coarse_unit(tmp_path: Path):
+    parts, _ = read_parts(SFile.load(_board(tmp_path)))
+    opts = PlaceOptions(
+        unit=1.0,
+        edge=0.5,
+        pad_edge=0.5,
+        overhang={"U1": 0.7},
+        apart=[{"a": ["U1"], "b": ["U2"], "gap": 0.5}],
+    )
+    problem = build_problem(parts, (0, 0), (None, None), opts)
+    assert problem["board"]["edge"] == problem["board"]["pad_edge"] == 1
+    assert problem["apart"][0]["gap"] == 1
+    assert problem["parts"][0]["overhang"] == 0
+    with pytest.raises(ProjectError, match="width"):
+        build_problem(parts, (0, 0), (None, None), PlaceOptions(unit=1.0, width=72.5))
+
+
+@solver
+def test_a_one_unit_grid_keeps_the_grid_line_the_solver_chose():
+    # unit = grid = 0.01 mm, the grid origin and the pad offset both off the unit
+    g = _square("G", 2, 2)
+    g.x, g.y = 3.006, 3.0
+    m = Part(
+        "M",
+        Node("footprint"),
+        10.0,
+        10.0,
+        0.0,
+        False,
+        (-1.0, -1.0, 1.0, 1.0),
+        [Pad("1", 0.004, 0.0, (-0.496, -0.5, 0.504, 0.5), None)],
+    )
+    opts = PlaceOptions(
+        gap=0,
+        edge=0,
+        pad_edge=0,
+        resolution=0.01,
+        unit=0.01,
+        grid=0.01,
+        grid_origin="G:1",
+        on_grid={"M": "1"},
+        fixed=["G"],
+        rotations={"M": [0]},
+        wire_weight=0,
+        time_limit=20,
+        workers=1,
+    )
+    problem = build_problem([g, m], (0, 0), (None, None), opts)
+    result = run_solver(problem)
+    assert result["status"] == "OPTIMAL"
+    w, h = result["width"] / 100, result["height"] / 100
+    x, y, _ = exact_positions(problem, result)[1]
+    assert x - 1 >= -1e-9 and y - 1 >= -1e-9 and x + 1 <= w + 1e-9 and y + 1 <= h + 1e-9
+    k = (x + 0.004 - 3.006) / 0.01  # its pad on the exact grid
+    assert abs(k - round(k)) < 1e-6
+    gx0, gy0 = 3.006 - 1, 3.0 - 1  # and clear of G (rounding the grid line anew put it
+    assert x + 1 <= gx0 + 1e-9 or y + 1 <= gy0 + 1e-9 or x - 1 >= 4.006 - 1e-9  # in G)
+
+
+@solver
+def test_the_bound_counts_the_geometry_the_coarse_unit_rounds_up():
+    parts = []
+    for k in range(10):
+        p = _square(f"P{k}", 0.4, 0.4)
+        p.pads = [Pad("1", 0.0, 0.0, (-0.1, -0.1, 0.1, 0.1), None)]
+        parts.append(p)
+    opts = PlaceOptions(
+        unit=1.0, width=2.0, edge=0, pad_edge=0, wire_weight=0, time_limit=20, workers=1
+    )
+    problem = build_problem(parts, (0, 0), (None, None), opts)
+    assert problem["parts"][0]["options"][0]["keep"] == [-1, -1, 1, 1]
+    res = run_solver(problem)
+    assert (
+        res["status"] == "OPTIMAL" and res["height"] == 20
+    )  # one column of 2 mm cells
+
+
+def test_a_coarse_unit_keeps_the_wire_weight(tmp_path: Path):
+    parts, _ = read_parts(SFile.load(_board(tmp_path)))
+    problem = build_problem(parts, (0, 0), (None, None), PlaceOptions(unit=1.0))
+    # 0.5 mm2 per mm at 1 mm units: 2 x area + 1 x wire, not round(0.5) = 0
+    assert (problem["wire_coef"], problem["area_coef"]) == (1, 2)
+    with pytest.raises(ProjectError, match="wire_weight"):
+        build_problem(parts, (0, 0), (None, None), PlaceOptions(wire_weight=-1))
+
+
+@solver
+def test_a_fixed_part_is_judged_where_it_really_stands_at_a_coarse_unit():
+    a, b = _square("A", 2, 2), _square("B", 2, 2)
+    a.x, a.y = 1.49, 1.0  # fixed; 1 mm units round it to 1
+    opts = PlaceOptions(
+        unit=1.0,
+        gap=0,
+        edge=0,
+        pad_edge=0,
+        fixed=["A"],
+        rotations={"B": [0]},
+        wire_weight=0,
+        time_limit=20,
+        workers=1,
+    )
+    problem = build_problem([a, b], (0, 0), (None, None), opts)
+    result = run_solver(problem)
+    assert result["status"] == "OPTIMAL"
+    (ax, ay, _), (bx, by, _) = exact_positions(problem, result)
+    assert (ax, ay) == pytest.approx((1.49, 1.0))
+    apart = abs(ax - bx) >= 2 - 1e-9 or abs(ay - by) >= 2 - 1e-9
+    assert apart  # no overlap with the part beside it

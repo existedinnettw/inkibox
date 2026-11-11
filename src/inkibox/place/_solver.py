@@ -161,7 +161,7 @@ def solve(p: dict) -> dict:
     else:
         area = m.new_int_var(0, bound * bound, "area")
         m.add_multiplication_equality(area, [W, H])
-    m.minimize(area + p["wire_coef"] * hpwl)
+    m.minimize(p.get("area_coef", 1) * area + p["wire_coef"] * hpwl)
 
     s = cp_model.CpSolver()
     s.parameters.max_time_in_seconds = float(p["time"])
