@@ -25,7 +25,7 @@ from pathlib import Path
 
 from ..kicad.sexpr import stable_uuid
 from ..kicad.sfile import Node, SFile, node, string, symbol
-from .footprints import SCHEMATIC_ATTRS, ExchangeError, exchange, ref_of
+from .footprints import SCHEMATIC_ATTRS, ExchangeError, attr_rank, exchange, ref_of
 from .libcache import LibraryCache, LibraryError
 from .netlist import Component
 from .options import FootprintOptions, PcbOptions
@@ -33,15 +33,6 @@ from .placement import absolute_angle, copper_layer_count, place
 from .report import Report
 from .uuids import stamp
 
-ATTR_ORDER = (
-    "smd",
-    "through_hole",
-    "board_only",
-    "exclude_from_pos_files",
-    "exclude_from_bom",
-    "allow_missing_courtyard",
-    "dnp",
-)
 BOARD_FIELDS_FIRST = ("Reference", "Value", "Datasheet", "Description")
 NET_ITEMS = ("segment", "arc", "via", "zone")
 
@@ -383,9 +374,7 @@ def _update_attrs(fp: Node, owned: set[str], ref: str, report: Report) -> None:
     new = [t for t in tokens if t not in SCHEMATIC_ATTRS] + [
         t for t in SCHEMATIC_ATTRS if t in owned
     ]
-    new = sorted(
-        new, key=lambda t: ATTR_ORDER.index(t) if t in ATTR_ORDER else len(ATTR_ORDER)
-    )
+    new = sorted(new, key=attr_rank)
     if new == tokens:
         return
     report.change(
