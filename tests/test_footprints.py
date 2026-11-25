@@ -434,3 +434,45 @@ def test_update_repairs_uuids_shared_between_footprints(tmp_path):
     second = SFile.load(pcb_path)
     report = update_footprints(second, libs, FootprintOptions())  # type: ignore[arg-type]
     assert report.changes == [] and not second.changed()
+
+
+NET_TIE = R_FOOTPRINT.replace(
+    "\t(attr smd)\n",
+    '\t(attr smd allow_missing_courtyard)\n\t(net_tie_pad_groups "1, 2")\n'
+    "\t(duplicate_pad_numbers_are_jumpers no)\n",
+)
+
+
+def test_attributes_and_pad_groups_come_out_in_kicads_order(tmp_path):
+    """
+    Given a net tie in the library (allow_missing_courtyard, pad groups) and on the board
+    a copy the schematic keeps out of the BOM
+    When it is exchanged, and footprints are updated twice
+    Then the attributes and pad groups are in the order KiCad writes them (the order
+    Update PCB sorts attributes into too), and the second update changes nothing
+    """
+    assert "allow_missing_courtyard" in NET_TIE  # the replace above took
+    fp = parse(
+        format_node(board_footprint()).replace(
+            "(attr smd dnp)", "(attr smd exclude_from_bom)"
+        )
+    )
+    text = format_node(
+        exchange(fp, parse(NET_TIE), LIB_ID, FootprintOptions(), copper=2)
+    )
+    assert "(attr smd exclude_from_bom allow_missing_courtyard)" in text
+    assert text.index("(net_tie_pad_groups") < text.index(
+        "(duplicate_pad_numbers_are_jumpers"
+    )
+
+    pcb_path = tmp_path / "b.kicad_pcb"
+    write_lf(
+        pcb_path, "(kicad_pcb\n\t(version 20260206)\n\t" + format_node(fp, 1) + "\n)\n"
+    )
+    libs = FakeLibs(footprints={LIB_ID: NET_TIE})
+    first = SFile.load(pcb_path)
+    update_footprints(first, libs, FootprintOptions())  # type: ignore[arg-type]
+    first.save()
+    second = SFile.load(pcb_path)
+    report = update_footprints(second, libs, FootprintOptions())  # type: ignore[arg-type]
+    assert report.changes == [] and not second.changed()

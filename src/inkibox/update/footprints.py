@@ -27,6 +27,17 @@ from .uuids import duplicates, make_unique, rename_members, set_uuid, stamp, uui
 
 # owned by the schematic (Update PCB), whatever the library footprint says
 SCHEMATIC_ATTRS = ("dnp", "exclude_from_bom", "exclude_from_pos_files")
+# the order KiCad writes a footprint's (attr …) tokens in; Update PCB and Update Footprints
+# both follow it, or each would undo the other's order on every run
+ATTR_ORDER = (
+    "smd",
+    "through_hole",
+    "board_only",
+    "exclude_from_pos_files",
+    "exclude_from_bom",
+    "allow_missing_courtyard",
+    "dnp",
+)
 CLEARANCE = (
     "solder_mask_margin",
     "solder_paste_margin",
@@ -38,12 +49,12 @@ CLEARANCE = (
     "thermal_gap",
 )
 BOARD_LINKS = ("path", "sheetname", "sheetfile", "component_classes")
-# pad numbering and layer options, as the library has them
+# pad numbering and layer options, as the library has them, in KiCad's write order
 PAD_GROUPS = (
-    "duplicate_pad_numbers_are_jumpers",
-    "net_tie_pad_groups",
-    "jumper_pad_groups",
     "private_layers",
+    "net_tie_pad_groups",
+    "duplicate_pad_numbers_are_jumpers",
+    "jumper_pad_groups",
 )
 GRAPHICS = (
     "fp_line",
@@ -157,6 +168,11 @@ def exchange(
     out.items += lib_children("embedded_fonts")
     out.items += lib_children("model") if opts.models_3d else board_children("model")
     return out
+
+
+def attr_rank(token: str) -> int:
+    """Sort key putting (attr …) tokens in KiCad's order, unknown ones last."""
+    return ATTR_ORDER.index(token) if token in ATTR_ORDER else len(ATTR_ORDER)
 
 
 def _in_order(items: list[Node], heads: tuple[str, ...]) -> list[Node]:
@@ -352,7 +368,7 @@ def _attr(existing: Node, lib_attr: Node | None, opts: FootprintOptions) -> Node
     )
     if old is None and existing.child("path") is None and lib_attr is not None:
         keep = [a.raw for a in lib_attr.atoms() if a.raw in SCHEMATIC_ATTRS]
-    tokens = kinds + keep
+    tokens = sorted(kinds + keep, key=attr_rank)
     if not tokens:
         return None
     new = node("attr", *[symbol(t) for t in tokens])
